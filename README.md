@@ -4,6 +4,9 @@ Play **The Elder Scrolls III: Morrowind in VR, standalone on Valve's Steam Frame
 [OpenMW-VR](https://gitlab.com/madsbuvi/openmw) that runs on the headset itself under SteamOS and renders
 through SteamVR's native OpenXR runtime. There is no PC, no streaming and no x86 emulation involved.
 
+![Seyda Neen's docks in OpenMW-VR on the Steam Frame: an Imperial guard stands on the wooden boardwalk in front of the Census and Excise building](docs/images/openmw-opening.jpg)
+*Seyda Neen, moments after stepping off the prison ship, rendered on the headset itself.*
+
 This repository has everything needed to reproduce it: the build script, the three source patches the Frame
 needs, the one-time setup script, recommended settings, diagnostics, and the notes from getting it working.
 A prebuilt binary release can be produced from it (`scripts/package.sh`) so others can skip the build.
@@ -23,6 +26,15 @@ pointer, and quit back to SteamVR. Tested on SteamOS 0.4.2 and 0.4.3 (VR variant
 | Head tracking, Frame controllers (through SteamVR's binding emulation), laser pointer | No Frame-specific controller profile in OpenMW-VR yet; SteamVR maps the Index/Touch bindings |
 | VR main menu, HUD, inventory, dialogue; launching from the Steam library | OpenMW-VR can crash while shutting down; the launcher makes that exit cleanly instead of hanging |
 | Morrowind + Tribunal + Bloodmoon from the Steam release | |
+
+## Screenshots
+
+From Steam's game recording, which captures the headset view (SteamOS default clocks, 1440×1440 per eye).
+
+| Character creation | The Bitter Coast |
+|---|---|
+| ![The class selection menu, with Knight highlighted, floating as a VR panel beside Sellus Gravius in the Census and Excise Office; a red laser pointer rests on the Next button](docs/images/openmw-class-creation.jpg) | ![A dirt trail winding between mossy boulders and misty trees on the Bitter Coast under a cloudy sky](docs/images/openmw-landscape.jpg) |
+| Menus float as VR panels; the red laser pointer picks **Next**. | Out on the trail beyond Seyda Neen. |
 
 ## What you need
 
@@ -149,6 +161,7 @@ its complete source.
 | [`docs/JOURNAL.md`](docs/JOURNAL.md) | Chronological log of how this install came together |
 | [`docs/RELEASE-README.md`](docs/RELEASE-README.md) | README shipped inside the binary release |
 | [`docs/attic/`](docs/attic) | Superseded patches from earlier attempts, kept for reference |
+| [`docs/images/`](docs/images) | Screenshots used in this README |
 
 ## Credits
 
