@@ -1,0 +1,17 @@
+Make the VR menus and HUD about a third larger: auto-sized layers get 768 instead of 1024 pixels per
+meter, so text is physically bigger and easier to read on the Steam Frame. The layers' render textures
+keep their resolution, so this costs no extra GPU time.
+
+diff --git a/files/data/scripts/omw/vr/ui/menu.lua b/files/data/scripts/omw/vr/ui/menu.lua
+index 8e2918d..e7655ac 100644
+--- a/files/data/scripts/omw/vr/ui/menu.lua
++++ b/files/data/scripts/omw/vr/ui/menu.lua
+@@ -170,7 +170,7 @@ local function createDefaultConfig(backgroundOpacity, autosize)
+         backgroundOpacity = backgroundOpacity,
+         center = util.vector2(0,0),
+         extent = util.vector2(1,1),
+-        pixelsPerMeter = 1024,
++        pixelsPerMeter = 768,
+         pixelResolution = util.vector2(1024, 1024),
+         autosize = autosize,
+     }

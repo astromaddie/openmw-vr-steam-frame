@@ -1,0 +1,19 @@
+SteamOS has no COLLADA DOM, so the OpenSceneGraph fork that OpenMW fetches for static builds never creates
+its .dae plugin target. OpenMW always lists osgdb_dae among the statically linked plugins, so configuring
+fails with 'Target "osgdb_dae" not found'. Drop the plugin when COLLADA DOM is missing: only some mods use
+.dae models (vanilla Morrowind is all NIF), and OpenMW's runtime plugin check is skipped for static OSG.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c52d380..f9792fb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -320,6 +320,9 @@ if(NOT COLLADA_DOM_VERSION_MINOR)
+ endif()
+ 
+ find_package(collada_dom 2.5)
++if(NOT collada_dom_FOUND)
++    list(REMOVE_ITEM USED_OSG_PLUGINS osgdb_dae)
++endif()
+ 
+ option(OPENMW_USE_SYSTEM_ICU "Use system ICU library instead of internal. If disabled, requires autotools" ON)
+ if(OPENMW_USE_SYSTEM_ICU)

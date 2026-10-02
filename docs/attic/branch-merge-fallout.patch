@@ -1,0 +1,51 @@
+Merge fallout in openmw-vr after upstream OpenMW 0.51: restore World::getActivationDistancePlusTelekinesis()
+(VR pointing still calls it; the source marks it MERGETODO) and drop the "force shaders" argument
+that SceneManager::recreateShaders() no longer takes.
+
+diff --git a/apps/openmw/mwvr/vrpointer.cpp b/apps/openmw/mwvr/vrpointer.cpp
+index 778a41e..693df79 100644
+--- a/apps/openmw/mwvr/vrpointer.cpp
++++ b/apps/openmw/mwvr/vrpointer.cpp
+@@ -361,7 +361,7 @@ namespace MWVR
+         stateset->addUniform(new osg::Uniform("sky", skyTextureSlot));
+         stateset->addUniform(new osg::Uniform("emissiveMult", 1.f));
+ 
+-        MWBase::Environment::get().getResourceSystem()->getSceneManager()->recreateShaders(geometry, "objects", true);
++        MWBase::Environment::get().getResourceSystem()->getSceneManager()->recreateShaders(geometry, "objects");
+ 
+         return geometry;
+     }
+diff --git a/apps/openmw/mwworld/worldimp.cpp b/apps/openmw/mwworld/worldimp.cpp
+index fa7505a..be528a3 100644
+--- a/apps/openmw/mwworld/worldimp.cpp
++++ b/apps/openmw/mwworld/worldimp.cpp
+@@ -904,6 +904,17 @@ namespace MWWorld
+         return static_cast<float>(iMaxActivateDist);
+     }
+ 
++    float World::getActivationDistancePlusTelekinesis()
++    {
++        const MWWorld::Ptr player = mPlayer->getPlayer();
++        const float telekinesisMagnitude = player.getClass()
++                                               .getCreatureStats(player)
++                                               .getMagicEffects()
++                                               .getOrDefault(ESM::MagicEffect::Telekinesis)
++                                               .getMagnitude();
++        return getMaxActivationDistance() + feetToGameUnits(telekinesisMagnitude);
++    }
++
+     MWWorld::Ptr World::getFocusObject()
+     {
+ //## VR_PATCH BEGIN
+diff --git a/apps/openmw/mwworld/worldimp.hpp b/apps/openmw/mwworld/worldimp.hpp
+index 93b8eea..fee4110 100644
+--- a/apps/openmw/mwworld/worldimp.hpp
++++ b/apps/openmw/mwworld/worldimp.hpp
+@@ -390,6 +390,7 @@ namespace MWWorld
+         /// obstructed).
+ 
+         float getMaxActivationDistance() const override;
++        float getActivationDistancePlusTelekinesis() override;
+ 
+         void queueMovement(const Ptr& ptr, const osg::Vec3f& velocity) override;
+         ///< Queues movement for \a ptr (in local space), to be applied in the next call to

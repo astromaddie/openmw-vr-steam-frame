@@ -1,0 +1,46 @@
+The VR GUI and pointer set up their state sets before the RenderingManager creates the ShadowManager,
+so ShadowManager::instance() throws "No ShadowManager exists yet" at startup. Only disable shadows
+when a ShadowManager exists (the source already comments out a third call for the same reason).
+
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+index 2bacdc4..b4878fd 100644
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -747,7 +747,9 @@ namespace MWVR
+         lightmodel->setAmbientIntensity(osg::Vec4(1.0, 1.0, 1.0, 1.0));
+         stateset->setAttributeAndModes(lightmodel, osg::StateAttribute::ON);
+ 
+-        SceneUtil::ShadowManager::instance().disableShadowsForStateSet(*stateset);
++        // May run before the RenderingManager has created the ShadowManager (see the GUI camera TODO above)
++        if (SceneUtil::ShadowManager::hasInstance())
++            SceneUtil::ShadowManager::instance().disableShadowsForStateSet(*stateset);
+         mGeometries->setStateSet(stateset);
+     }
+ 
+diff --git a/apps/openmw/mwvr/vrpointer.cpp b/apps/openmw/mwvr/vrpointer.cpp
+index 693df79..1f3bf58 100644
+--- a/apps/openmw/mwvr/vrpointer.cpp
++++ b/apps/openmw/mwvr/vrpointer.cpp
+@@ -342,7 +342,9 @@ namespace MWVR
+         osg::ref_ptr<osg::LightModel> lightmodel = new osg::LightModel;
+         lightmodel->setAmbientIntensity(osg::Vec4(1.0, 1.0, 1.0, 1.0));
+         stateset->setAttributeAndModes(lightmodel, osg::StateAttribute::ON);
+-        SceneUtil::ShadowManager::instance().disableShadowsForStateSet(*stateset);
++        // May run before the RenderingManager has created the ShadowManager
++        if (SceneUtil::ShadowManager::hasInstance())
++            SceneUtil::ShadowManager::instance().disableShadowsForStateSet(*stateset);
+ 
+         osg::ref_ptr<osg::Material> material = new osg::Material;
+         material->setColorMode(osg::Material::ColorMode::AMBIENT_AND_DIFFUSE);
+diff --git a/components/sceneutil/shadow.hpp b/components/sceneutil/shadow.hpp
+index 952d750..a51037a 100644
+--- a/components/sceneutil/shadow.hpp
++++ b/components/sceneutil/shadow.hpp
+@@ -29,6 +29,7 @@ namespace SceneUtil
+         static Shader::ShaderManager::DefineMap getShadowsDisabledDefines();
+ 
+         static const ShadowManager& instance();
++        static bool hasInstance() { return sInstance != nullptr; }
+ 
+         explicit ShadowManager(osg::ref_ptr<osg::Group> sceneRoot, osg::ref_ptr<osg::Group> rootNode,
+             unsigned int outdoorShadowCastingMask, unsigned int indoorShadowCastingMask, unsigned int worldMask,

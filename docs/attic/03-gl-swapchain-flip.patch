@@ -1,0 +1,33 @@
+SteamVR on the Steam Frame reads OpenGL swapchain images top row first, so OpenMW-VR appears upside
+down. Add an opt-in OPENMW_VR_FLIP_SWAPCHAIN=1 that makes the OpenGL path flip its blit into the
+swapchain, the same way the Windows D3D11 path already does.
+
+diff --git a/components/xr/swapchain.cpp b/components/xr/swapchain.cpp
+index 4552dde..51d53c4 100644
+--- a/components/xr/swapchain.cpp
++++ b/components/xr/swapchain.cpp
+@@ -5,6 +5,9 @@
+ #include "instance.hpp"
+ 
+ #include <components/debug/debuglog.hpp>
++#include <components/misc/strings/conversion.hpp>
++
++#include <cstdlib>
+ 
+ // The OpenXR SDK's platform headers assume we've included platform headers
+ #ifdef _WIN32
+@@ -83,7 +86,13 @@ namespace XR
+ #ifdef XR_USE_GRAPHICS_API_D3D11
+         return XR::Extensions::instance().extensionEnabled(XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
+ #else
+-        return false;
++        // Some runtimes read OpenGL swapchain images top row first (SteamVR on the Steam Frame does),
++        // which shows the game upside down. OPENMW_VR_FLIP_SWAPCHAIN=1 flips the blit to compensate.
++        static const bool flip = [] {
++            const auto env = std::getenv("OPENMW_VR_FLIP_SWAPCHAIN");
++            return env != nullptr && Misc::StringUtils::toNumeric<int>(env, 0) != 0;
++        }();
++        return flip;
+ #endif
+     }
+ 
