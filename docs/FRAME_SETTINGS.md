@@ -121,11 +121,13 @@ stubs native APIs; it does not establish rendered geometry, physical pointer or
 controller operation, audio/haptic output, or C++ build success.
 
 `OPENMW_FRAME_SETTINGS_PREVIEW=1` opens the panel once a real game is running,
-through the same production entrypoint as the pause button. Combine with the
-bounded diagnostic capture workflow for native stereo screenshots. It is off
-by default and does not synthesize input or change settings. Inspect the settled
-native panel, all tabs, pause/Back origin and pointer/selection behavior before
-claiming visual acceptance.
+through the same production entrypoint as the pause button. It is off by default
+and does not synthesize input or change settings. The normal-runtime idle-device
+method in [validation](VALIDATION.md) supports native F12 captures without forced
+rendering. Final native captures cover all six tabs and MenuBack; the tab row uses
+the existing horizontal layout so selected and active labels fit their actual
+font widths. Physical pointer operation and headset readability remain separate
+interaction checks.
 
 Scale/posture checks (Python 3 and clang++; no extra package dependency):
 

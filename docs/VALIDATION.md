@@ -91,7 +91,7 @@ eye images for every rendering or quality optimization.
 and 11 native Lua UI checks. Production helper executables and Lua modules are
 exercised directly. Shell syntax and applied-source whitespace checks passed.
 
-The native ARM64 Ubuntu 24.04 build passed with the active ordered patch series through 20 plus 23–24. Experimental patches 21–22 are deferred. Both VR and flat
+The native ARM64 Ubuntu 24.04 build passed with the active ordered patch series through 20 plus 23–25. Experimental patches 21–22 are deferred. Both VR and flat
 engine targets compile; a separate `BUILD_OPENMW_VR=OFF` configuration also built.
 ELF architecture, executable versions, shared-library resolution, source/patch
 manifests and package checksums passed. The pinned engine revision is
@@ -151,7 +151,8 @@ blank images and are not used as scene-correctness evidence.
 
 The original engine's native quit reproduced `GLX BadAccess` in
 `X_GLXMakeCurrent`. Patch 23 stops render threads before GUI teardown and
-eliminated that error in the candidate. A later SIGSEGV occurred after the engine's peaceful-exit log. A parent-launched
+eliminated that error in the candidate. A later SIGSEGV occurred after the
+engine's peaceful-exit log. A parent-launched
 GDB trace identified the retained owner: `RenderBinPrototypeList` →
 `osgUtil::RenderBin` → `MWRender::DistortionCallback` →
 `osg::FrameBufferObject`. Patch 24 releases the Distortion prototype's callback
@@ -178,7 +179,7 @@ Both runs restored the baseline launcher SHA256
 removed the temporary compositor override and left no owned game/reaper/debugger
 processes. Audio sinks and their volumes/mutes were unchanged.
 
-Installed package: `openmw-vr-0.51-rc1-frame-eae2fdd-aarch64.tar.xz`, SHA256
+Initial clean-exit package: `openmw-vr-0.51-rc1-frame-eae2fdd-aarch64.tar.xz`, SHA256
 `20c8a1fd4acdc5b94b0c2dfddda5714dedc67022ab067b517bde42cf561bf8de`.
 Engine ELF build ID: `b99052846eb94fb4faaa24e5b6ce0f8f32ccf255`.
 
@@ -191,6 +192,42 @@ A separate `OPENMW_FRAME_SETTINGS_PREVIEW=1` run captured Comfort, Controls,
 HUD & Menus, Display, Accessibility and Room. The supported Lua input-trigger API
 navigated between tabs; MenuBack removed the panel, and native quit returned 0.
 The capture exposed crowded active labels in the fixed-width tab spacing.
-Patch 25 uses the native horizontal layout and actual font widths for the tabs. Physical
+Patch 25 uses the native horizontal layout and actual font widths for the tabs.
+Physical
 controller pointing, stereo presentation, comfort and sustained gameplay timing
 remain separate acceptance checks.
+
+### Final package and repeat checks
+
+`openmw-vr-0.51-rc1-frame-2d93d03-aarch64.tar.xz` is installed behind the regular
+**OpenMW Frame** Steam entry. Binary archive SHA256:
+`925de7a7c5af960f0e2f13d9621f173d3d6113ca09e2a19e14c8a1eddfa95a4a`.
+Corresponding engine-source archive SHA256:
+`6b5baf0f930dfec144e1a2dca1d54048edf9df7070f7e69075b99bfb5815b141`.
+
+All 41 source/installer checks passed through patch 25. The package's source and
+patch manifests, internal checksums, AArch64 architecture and shared-library
+checks passed. The final change is Lua layout only; all three engine binaries
+retain their preceding build IDs.
+
+The final package repeated all six tab captures and MenuBack. The long active
+labels have distinct borders with no neighbour overlap. Native quit returned 0.
+The actual regular Steam launcher then reached OpenXR FOCUSED using its ordinary
+Frame profile and closed through `WM_DELETE_WINDOW`, returning 0. That final
+launcher test added only `--no-sound` for unattended quiet; it did not add the QA
+addon, force rendering or enable the settings preview. It does not verify audio.
+No owned game, reaper or debugger processes remained after either run.
+
+The installed launcher SHA256 is
+`755fc473114cf111de6aadfb8aae6c317517c63feb87c92d771f8de8ba6487cb`.
+The original Baseline launcher hash still matches the value above. The temporary
+power override was removed and its original effective value verified. Speaker
+output remained unmuted at 61%; the separate speaker-EQ sink remained unmuted at
+90%. Existing save-file hashes matched across the final checks.
+
+After preserving the identities, reproduction details, useful captures and the
+shutdown trace, obsolete packages, debug binaries, build caches and private QA
+data were removed. This final testing pass removed approximately 3.3 GiB of
+allocated files on the Mac and 1.5 GiB on the Frame. The author baseline, final
+installed release, source, current binary/source archives and user profiles/game
+data remain. The shared device booking and Mac build slot were released.
