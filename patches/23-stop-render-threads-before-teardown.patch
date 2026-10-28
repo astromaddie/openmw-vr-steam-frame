@@ -1,0 +1,15 @@
+Stop rendering threads before GUI resources acquire the GLX context during shutdown.
+
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -518,6 +518,10 @@
+ 
+ OMW::Engine::~Engine()
+ {
++    // Render threads may still own the GLX context. Join them before GUI teardown
++    // makes that context current on the main thread.
++    if (mViewer)
++        mViewer->stopThreading();
+     if (mScreenCaptureOperation != nullptr)
+     {
+         mScreenCaptureOperation->stop();
