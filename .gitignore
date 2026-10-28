@@ -1,2 +1,5 @@
 # Release tarballs are large; publish them as GitHub release assets instead of committing them.
 dist/
+__pycache__/
+*.pyc
+.build/
