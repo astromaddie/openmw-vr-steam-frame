@@ -91,7 +91,7 @@ eye images for every rendering or quality optimization.
 and 11 native Lua UI checks. Production helper executables and Lua modules are
 exercised directly. Shell syntax and applied-source whitespace checks passed.
 
-The native ARM64 Ubuntu 24.04 build passed with the complete ordered patch series through 19. Both VR and flat
+The native ARM64 Ubuntu 24.04 build passed with the active ordered patch series through 20 plus 23. Experimental patches 21–22 are deferred. Both VR and flat
 engine targets compile; a separate `BUILD_OPENMW_VR=OFF` configuration also built.
 ELF architecture, executable versions, shared-library resolution, source/patch
 manifests and package checksums passed. The pinned engine revision is
@@ -124,3 +124,35 @@ initialization cleanup and fixes the diagnostic identifier constructor reading i
 own unconstructed string. Unused legacy shader lookups were also removed; the
 installed GUI shaders are loaded by `getProgram("gui")`. The corrected native build
 passes compilation; rendered startup and clean-exit checks remain required.
+
+### 2026-10-29 normal-runtime checks
+
+Tests use the unchanged author engine first, then the candidate, through Steam
+with separate QA configuration/data. The stock compositor setting
+`power.pauseCompositorOnStandby=false` allowed the original OpenXR session to
+reach FOCUSED and submit 1,002 frames (1,000 presents in the collected sample).
+No forced-render or synthetic-pose environment flags were used. The original
+setting had no override and an effective value of true; cleanup removes the
+temporary override and verifies that effective value.
+
+The QA workload uses a supported `MENU` Lua script in a private `.omwscripts`
+data directory. Its `onFrame` handler disables tutorial popups in QA player
+storage, requests a save while synchronized, then requests quit using a
+real-time deadline. Ordinary `--script-run` files cannot switch Lua console
+contexts and immediately execute following Lua lines: those context changes
+are deferred. Timer callbacks also lack the synchronization required by
+`menu.saveGame`.
+
+The original engine and candidate both reached Running and wrote QA saves.
+Candidate save size was 66,524 bytes. Its built-in F12 capture contains HUD,
+hands and interior geometry; the off-head view is not a stereo or interaction
+acceptance check. X11 window grabs and the background screenshot API returned
+blank images and are not used as scene-correctness evidence.
+
+The original engine's native quit reproduced `GLX BadAccess` in
+`X_GLXMakeCurrent`. Patch 23 stops render threads before GUI teardown and
+eliminated that error in the candidate. A later SIGSEGV after the engine's
+peaceful-exit log remains under investigation; that log alone does not prove a
+clean process exit. The installer retains the author's
+`OPENMW_DISABLE_CRASH_CATCHER=1` workaround so this late fault cannot strand
+crash-handler children in Steam. Save reload and a clean exit remain open gates.
