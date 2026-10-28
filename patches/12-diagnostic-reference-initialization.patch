@@ -1,0 +1,30 @@
+diff --git a/components/xr/session.cpp b/components/xr/session.cpp
+--- a/components/xr/session.cpp
++++ b/components/xr/session.cpp
+@@ -829,7 +829,7 @@
+     {
+         auto tp = locateSpace(space, mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1]->xrSpace());
+         tp.pose.position = VR::physicalToWorld(tp.pose.position, worldScale());
+-        tp.pose.position.mZ += Stereo::Unit::fromMeters(VR::postureTranslation(mPosture.center(), heightOffset(), worldScale()));
++        tp.pose.position.mZ += Stereo::Unit::fromMeters(VR::postureTranslation(mFrameDiagnosticSyntheticViewsActive ? 1.65f : mPosture.center(), heightOffset(), worldScale()));
+         tp.pose = mReferenceWorldPose + tp.pose;
+         return tp;
+     }
+diff --git a/components/xr/space.cpp b/components/xr/space.cpp
+--- a/components/xr/space.cpp
++++ b/components/xr/space.cpp
+@@ -94,12 +94,12 @@
+     void ReferenceSpace::recenter(bool recenterX, bool recenterY, bool recenterZ) 
+     {
+         auto& session = Session::instance();
+-        XrSpaceWrapper raw(session.createReferenceSpace(mType, {}));
++        mSpace = session.createReferenceSpace(mType, {});
+         session.clearPoseCache();
+         if (mRecenterTo && mRecenterTo != mType)
+         {
+             auto other = std::dynamic_pointer_cast<XR::Space>(session.getReferenceSpace(mRecenterTo.value()));
+-            auto tp = session.locateSpace(other->xrSpace(), raw.mSpace);
++            auto tp = session.locateSpace(other->xrSpace(), mSpace.mSpace);
+             if (tp.status == VR::TrackingStatus::Good)
+             {
+                 if (recenterX)

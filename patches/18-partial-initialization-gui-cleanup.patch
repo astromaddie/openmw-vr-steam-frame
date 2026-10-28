@@ -1,0 +1,37 @@
+Guard GUI cleanup when initialization fails before the VR GUI manager exists.
+
+--- a/apps/openmw/mwvr/vrgui.hpp
++++ b/apps/openmw/mwvr/vrgui.hpp
+@@ -149,6 +149,7 @@
+         static constexpr const char* DefaultUiSpace = "/default/ui/menu";
+ 
+         static VRGUIManager& instance();
++        static bool hasInstance();
+ 
+         VRGUIManager(osg::Group* rootNode, std::filesystem::path diagnosticCaptureDirectory,
+             uint64_t diagnosticCaptureFrame);
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -736,6 +736,11 @@
+     }
+ 
+     VRGUIManager* sManager = nullptr;
++
++    bool VRGUIManager::hasInstance()
++    {
++        return sManager != nullptr;
++    }
+     VRGUIManager& VRGUIManager::instance()
+     {
+         assert(sManager);
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -620,7 +620,7 @@
+     {
+         try
+         {
+-            if (VR::getVR())
++            if (VR::getVR() && MWVR::VRGUIManager::hasInstance())
+                 MWVR::VRGUIManager::instance().clearLua();
+             LuaUi::clearGameInterface();
+             LuaUi::clearMenuInterface();

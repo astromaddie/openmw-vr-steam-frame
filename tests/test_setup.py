@@ -93,6 +93,15 @@ class SetupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ARM64'):
             setup.check_binary(self.build)
 
+    def test_missing_library_version_on_stderr_is_rejected(self):
+        binary = self.build / 'openmw_vr'
+        binary.write_bytes(b'\x7fELF\x02\x01' + b'\0' * 12 + bytes([183, 0]))
+        binary.chmod(0o755)
+        result = subprocess.CompletedProcess([], 0, 'libc.so => /lib/libc.so', 'GLIBC_9.0 not found')
+        with patch.object(setup.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(ValueError, 'Runtime library check failed'):
+                setup.check_binary(self.build)
+
     def test_failed_importer_does_not_publish_config(self):
         (self.data.parent / 'Morrowind.ini').touch()
         with patch.object(setup.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'importer')):

@@ -1,0 +1,536 @@
+diff --git a/apps/openmw/mwgui/mainmenu.cpp b/apps/openmw/mwgui/mainmenu.cpp
+index 1e1a9e7..da7cbfd 100644
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -22,6 +22,9 @@
+ #include "confirmationdialog.hpp"
+ #include "savegamedialog.hpp"
+ #include "settingswindow.hpp"
++#include "../mwvr/vrmetamenu.hpp"
++#include <components/vr/vr.hpp>
++#include <MyGUI_Button.h>
+ #include "videowidget.hpp"
+ 
+ namespace MWGui
+@@ -164,7 +167,11 @@ namespace MWGui
+ 
+         const std::string& name = *sender->getUserData<std::string>();
+         winMgr->playSound(ESM::RefId::stringRefId("Menu Click"));
+-        if (name == "return")
++        if (name == "vrsettings")
++        {
++            MWVR::VrMetaMenu::openSettings();
++        }
++        else if (name == "return")
+             winMgr->removeGuiMode(GM_MainMenu);
+         else if (name == "credits")
+             winMgr->playVideo("mw_credits.bik", true);
+@@ -347,6 +354,18 @@ namespace MWGui
+                 maxwidth = requested.width;
+         }
+ 
++        if (!mVRSettingsButton)
++        {
++            mVRSettingsButton = mButtonBox->createWidget<MyGUI::Button>(
++                "MW_Button", MyGUI::IntCoord(0, 0, 240, 48), MyGUI::Align::Default);
++            mVRSettingsButton->setCaption("VR Settings");
++            mVRSettingsButton->setFontHeight(28);
++            mVRSettingsButton->setUserData(std::string("vrsettings"));
++            mVRSettingsButton->eventMouseButtonClick += MyGUI::newDelegate(this, &MainMenu::onButtonClicked);
++        }
++        const bool showVRSettings = VR::getVR() && state == MWBase::StateManager::State_Running;
++        mVRSettingsButton->setVisible(showVRSettings);
++
+         // Now show and position the ones we want
+         for (const std::string& buttonId : buttons)
+         {
+@@ -370,6 +389,11 @@ namespace MWGui
+             curH += static_cast<int>(height / scale - 16);
+         }
+ 
++        if (showVRSettings)
++        {
++            mVRSettingsButton->setCoord((maxwidth - 240) / 2, curH + 8, 240, 48);
++            curH += 56;
++        }
+         if (state == MWBase::StateManager::State_NoGame)
+         {
+             // Align with the background image
+diff --git a/apps/openmw/mwgui/mainmenu.hpp b/apps/openmw/mwgui/mainmenu.hpp
+index 453a16b..32ea352 100644
+--- a/apps/openmw/mwgui/mainmenu.hpp
++++ b/apps/openmw/mwgui/mainmenu.hpp
+@@ -58,6 +58,7 @@ namespace MWGui
+     private:
+         const VFS::Manager* mVFS;
+ 
++        MyGUI::Button* mVRSettingsButton = nullptr;
+         MyGUI::Widget* mButtonBox;
+         MyGUI::TextBox* mVersionText;
+ 
+diff --git a/apps/openmw/mwlua/vrbindings.cpp b/apps/openmw/mwlua/vrbindings.cpp
+index 2e229ba..2a9e4be 100644
+--- a/apps/openmw/mwlua/vrbindings.cpp
++++ b/apps/openmw/mwlua/vrbindings.cpp
+@@ -1,4 +1,8 @@
+ #include "vrbindings.hpp"
++#include "../mwvr/vrmetamenu.hpp"
++#include "../mwbase/windowmanager.hpp"
++#include "../mwbase/statemanager.hpp"
++#include <components/settings/values.hpp>
+ #include "../mwbase/world.hpp"
+ #include "../mwvr/openxrinput.hpp"
+ #include "../mwvr/vrgui.hpp"
+@@ -12,6 +16,10 @@
+ #include <components/xr/session.hpp>
+ 
+ #include <vector>
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#include <stdexcept>
+ 
+ namespace MWLua
+ {
+@@ -140,7 +148,48 @@ namespace MWLua
+         MWVR::OpenXRInput& xrinput = MWVR::OpenXRInput::instance();
+         api["availableInteractions"] = getAvailableInteractions(context);
+         api["availableReferenceSpaces"] = getAvailableReferenceSpaces(context);
++        // Narrow native bridge: only settings with established runtime consumers.
++        api["_frameSettingsActive"] = []() {
++            // Opt-in unattended rendering check. Normal sessions never take this path.
++            static bool previewOpened = false;
++            const char* preview = std::getenv("OPENMW_FRAME_SETTINGS_PREVIEW");
++            if (!previewOpened && preview && std::string_view(preview) == "1"
++                && MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_Running)
++            {
++                previewOpened = true;
++                MWVR::VrMetaMenu::openSettings();
++            }
++            return MWVR::VrMetaMenu::sSettingsOpen
++                && MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_VrMetaMenu)
++                && MWBase::Environment::get().getWindowManager()->getMode() == MWGui::GM_VrMetaMenu;
++        };
++        api["_closeFrameSettings"] = []() { MWVR::VrMetaMenu::closeSettings(); };
++        api["_frameOpenOptions"] = []() {
++            MWVR::VrMetaMenu::sSettingsOpen = false;
++            MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_VrMetaMenu);
++            MWBase::Environment::get().getWindowManager()->toggleSettingsWindow();
++        };
++        api["_frameSettingGet"] = [](const std::string& key) -> double {
++            if (key == "haptics enabled") return Settings::vr().mHapticsEnabled ? 1.0 : 0.0;
++            if (key == "left handed mode") return Settings::vr().mLeftHandedMode ? 1.0 : 0.0;
++            if (key == "hand directed movement") return Settings::vr().mHandDirectedMovement ? 1.0 : 0.0;
++            if (key == "show 3D crosshairs") return Settings::vr().mShow3DCrosshairs ? 1.0 : 0.0;
++            throw std::invalid_argument("Unknown Frame VR setting");
++        };
++        api["_frameSettingSet"] = [](const std::string& key, double value) {
++            if (!std::isfinite(value)) throw std::invalid_argument("Non-finite Frame VR setting");
++            if (key == "haptics enabled") Settings::vr().mHapticsEnabled.set(value != 0);
++            else if (key == "left handed mode")
++            {
++                Settings::vr().mLeftHandedMode.set(value != 0);
++                VR::setLeftHandedMode(value != 0);
++            }
++            else if (key == "hand directed movement") Settings::vr().mHandDirectedMovement.set(value != 0);
++            else if (key == "show 3D crosshairs") Settings::vr().mShow3DCrosshairs.set(value != 0);
++            else throw std::invalid_argument("Unknown Frame VR setting");
++            MWBase::Environment::get().getWorld()->processChangedSettings({ { "VR", key } });
++        };
+         api["isFocused"] = []() { return XR::Session::instance().shouldReadInput(); };
+         api["isLeftHandedMode"] = []() { return VR::getLeftHandedMode(); };
+         api["isControllerActive"]
+             = [](const std::string& path) -> bool { return VR::getControllerActive(VR::stringToXrPath(path)); };
+@@ -169,7 +218,9 @@ namespace MWLua
+         // All known /output/ path values are of type FLOAT.
+         // If there is ever a reason to support more, we can expand this with overloads (or use sol::object).
+         api["_setOutputValue"] = [&actionSet = MWVR::OpenXRInput::instance().getActionSet(MWVR::MWActionSet::Haptics)](
+-                                     const std::string& path, float value) { actionSet.applyHaptics(path, value); };
++                                     const std::string& path, float value) {
++            actionSet.applyHaptics(path, Settings::vr().mHapticsEnabled ? value : 0.f);
++        };
+ 
+         api["_locateSpaceInWorld"] = [&xrinput, lua](const std::string& spaceId) -> sol::object {
+             if (!VR::getLocatingSpacesAllowed())
+diff --git a/apps/openmw/mwvr/vrmetamenu.cpp b/apps/openmw/mwvr/vrmetamenu.cpp
+index a3d87fc..ed2860c 100644
+--- a/apps/openmw/mwvr/vrmetamenu.cpp
++++ b/apps/openmw/mwvr/vrmetamenu.cpp
+@@ -24,6 +24,22 @@ namespace MWVR
+ 
+     VrMetaMenu::~VrMetaMenu() {}
+ 
++    void VrMetaMenu::openSettings()
++    {
++        auto* wm = MWBase::Environment::get().getWindowManager();
++        sReturnToMeta = wm->containsMode(MWGui::GM_VrMetaMenu);
++        sSettingsOpen = true;
++        if (!sReturnToMeta)
++            wm->pushGuiMode(MWGui::GM_VrMetaMenu);
++    }
++
++    void VrMetaMenu::closeSettings()
++    {
++        sSettingsOpen = false;
++        if (!sReturnToMeta)
++            MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_VrMetaMenu);
++    }
++
+     void VrMetaMenu::onResChange(int w, int h)
+     {
+         mWidth = w;
+@@ -42,7 +58,7 @@ namespace MWVR
+         Layout::setVisible(visible);
+     }
+ 
+-    void VrMetaMenu::onFrame(float dt) {}
++    void VrMetaMenu::onFrame(float dt) { mMainWidget->setVisible(!sSettingsOpen); }
+ 
+     void VrMetaMenu::onConsole()
+     {
+@@ -117,6 +133,11 @@ namespace MWVR
+     void VrMetaMenu::onButtonClicked(MyGUI::Widget* sender)
+     {
+         std::string name = *sender->getUserData<std::string>();
++        if (name == "vrsettings")
++        {
++            openSettings();
++            return;
++        }
+         close();
+         if (name == "console")
+             onConsole();
+@@ -144,12 +165,17 @@ namespace MWVR
+ 
+     bool VrMetaMenu::exit()
+     {
++        if (sSettingsOpen)
++        {
++            sSettingsOpen = false;
++            return !sReturnToMeta;
++        }
+         return MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_Running;
+     }
+ 
+     void VrMetaMenu::updateMenu()
+     {
+-        static std::vector<std::string> buttons{ "return", "recenterXY", "recenterXYZ", "quicksave", "quickload",
++        static std::vector<std::string> buttons{ "vrsettings", "return", "recenterXY", "recenterXYZ", "quicksave", "quickload",
+             "console", "inventory", "journal", "rest", "quickmenu", "gamemenu", "postprocessor" };
+ 
+         if (mButtons.empty())
+diff --git a/apps/openmw/mwvr/vrmetamenu.hpp b/apps/openmw/mwvr/vrmetamenu.hpp
+index ee18835..c5f83aa 100644
+--- a/apps/openmw/mwvr/vrmetamenu.hpp
++++ b/apps/openmw/mwvr/vrmetamenu.hpp
+@@ -24,6 +24,10 @@ namespace MWVR
+         int mHeight;
+ 
+     public:
++        inline static bool sSettingsOpen = false;
++        inline static bool sReturnToMeta = false;
++        static void openSettings();
++        static void closeSettings();
+         VrMetaMenu(int w, int h);
+         ~VrMetaMenu();
+ 
+diff --git a/files/data/builtin.omwscripts b/files/data/builtin.omwscripts
+index 14d1c70..613086a 100644
+--- a/files/data/builtin.omwscripts
++++ b/files/data/builtin.omwscripts
+@@ -50,3 +50,5 @@ PLAYER: scripts/omw/vr/inputs/player.lua
+ MENU: scripts/omw/vr/ui/settingsrenderer.lua
+ MENU: scripts/omw/vr/ui/menu.lua
+ PLAYER: scripts/omw/vr/ui/player.lua
++
++MENU: scripts/omw/vr/ui/framesettings.lua
+diff --git a/files/data/mygui/openmw_vr_metamenu.layout b/files/data/mygui/openmw_vr_metamenu.layout
+index d29ceba..8160834 100644
+--- a/files/data/mygui/openmw_vr_metamenu.layout
++++ b/files/data/mygui/openmw_vr_metamenu.layout
+@@ -7,6 +7,10 @@
+         <Property key="Padding" value="50"/>
+         <Property key="Spacing" value="12"/>
+ 
++        <Widget type="AutoSizedButton" skin="MW_Button" name="vrsettings" align="HCenter">
++            <Property key="Caption" value="VR Settings"/>
++            <Property key="FontHeight" value="32"/>
++        </Widget>
+         <Widget type="AutoSizedButton" skin="MW_Button" name="return" align="HCenter">
+             <Property key="Caption" value="Return"/>
+             <Property key="FontHeight" value="32"/>
+diff --git a/files/data/scripts/omw/vr/ui/framesettings.lua b/files/data/scripts/omw/vr/ui/framesettings.lua
+new file mode 100644
+index 0000000..47c1d24
+--- /dev/null
++++ b/files/data/scripts/omw/vr/ui/framesettings.lua
+@@ -0,0 +1,207 @@
++-- Native MWUI panel: all edits use the same settings/storage as gameplay.
++local vr = require('openmw.vr')
++if not vr.isVr() then return {} end
++local ui = require('openmw.ui')
++local util = require('openmw.util')
++local storage = require('openmw.storage')
++local input = require('openmw.input')
++local async = require('openmw.async')
++local I = require('openmw.interfaces')
++local controls = require('scripts.omw.vr.inputs.common').controlsSection
++local button = require('scripts.omw.vr.ui.button')
++local prefs = storage.playerSection('SettingsFrameVR')
++local spaces = storage.playerSection('SpacesGroup')
++local V2 = util.vector2
++local tabs = {'Comfort', 'Controls', 'HUD & Menus', 'Display', 'Accessibility', 'Room'}
++local activeTab, selected = 1, 1
++local panel, buttons, dirty = nil, {}, true
++local pointerFocus = nil
++local rebuild
++local function profile() return prefs:get('defaults_profile') or 'standard' end
++local function native(key) return vr._frameSettingGet(key) end
++local function setNative(key, v) vr._frameSettingSet(key, v); dirty = true end
++local function set(section, key, v) section:set(key, v); dirty = true end
++local function close() vr._closeFrameSettings() end
++local function turnDefaults()
++    controls:set('SmoothTurn', profile() == 'frame_personal')
++    controls:set('SmoothTurnSensitivity', math.rad(120))
++    controls:set('SnapTurnRate', 30)
++end
++local function defaults()
++    -- Tab-scoped defaults preserve other categories and unknown settings.
++    if activeTab == 1 then turnDefaults()
++    elseif activeTab == 2 then
++        for key, v in pairs({['haptics enabled']=1, ['left handed mode']=0, ['hand directed movement']=0}) do
++            vr._frameSettingSet(key, v)
++        end
++    elseif activeTab == 3 then
++        prefs:set('menu_scale', 1)
++        prefs:set('hud_scale', 1)
++        prefs:set('menu_distance', 1)
++        spaces:set('HUDSpace', 'LeftWristTop')
++    elseif activeTab == 5 then
++        vr._frameSettingSet('show 3D crosshairs', 1)
++        controls:set('PhysicalSneak', false)
++    end
++    dirty = true
++end
++local function number(section,key,fallback,lo,hi)
++    local v=section:get(key)
++    if type(v)~='number' or v~=v or math.abs(v)==math.huge then return fallback end
++    return math.max(lo,math.min(hi,v))
++end
++local function label(text, x, y, width, size)
++    return {template=I.MWUI.templates.textNormal, props={text=text, position=V2(x,y),
++        size=V2(width,40), textSize=size or 24}}
++end
++local function addButton(content, text, x, y, cb)
++    local n = #buttons + 1
++    local b = button((selected == n and '> ' or '') .. text, function() selected=n; cb(); dirty=true end)
++    b.alive=true
++    b.buttonContent[1].events.focusGain=async:callback(function()
++        if not b.alive then return end
++        pointerFocus=n
++        b.focused=true
++        b:update()
++        return true
++    end)
++    b.buttonContent[1].events.focusLoss=async:callback(function()
++        if not b.alive then return end
++        if pointerFocus==n then pointerFocus=nil end
++        b.focused=false
++        b:update()
++        return true
++    end)
++    b.textContent[1].props.textSize = y == 70 and 18 or 22
++    b.element.layout.props.position=V2(x,y)
++    b.element:update()
++    buttons[n]=b
++    content[#content+1]=b.element
++end
++local function row(content, y, text, shown, minus, plus)
++    content[#content+1]=label(text,24,y+4,360)
++    content[#content+1]=label(shown,390,y+4,230)
++    addButton(content,'- ',650,y,minus)
++    addButton(content,'+ ',740,y,plus)
++end
++local function toggle(content,y,text,shown,cb)
++    content[#content+1]=label(text,24,y+4,360)
++    addButton(content,shown,390,y,cb)
++end
++local function nativeToggle(content,y,text,key,off,on)
++    toggle(content,y,text,native(key)~=0 and (on or 'On') or (off or 'Off'),
++        function() setNative(key,native(key)==0 and 1 or 0) end)
++end
++local function step(content,y,text,section,key,fallback,delta,lo,hi,format)
++    local v=number(section,key,fallback,lo,hi)
++    row(content,y,text,string.format(format or '%.2f',v),
++        function() set(section,key,math.max(lo,v-delta)) end,
++        function() set(section,key,math.min(hi,v+delta)) end)
++end
++rebuild=function()
++    for _,b in ipairs(buttons) do b.alive=false; b:cleanup() end
++    if panel then panel:destroy(); panel=nil end
++    buttons={}
++    pointerFocus=nil
++    local content={label('VR Settings',24,16,500,32)}
++    for n,name in ipairs(tabs) do
++        addButton(content,(n==activeTab and '['..name..']' or name),24+(n-1)*142,70,
++            function() activeTab=n; selected=n end)
++    end
++    local y=140
++    if activeTab==1 then
++        toggle(content,y,'Turning',controls:get('SmoothTurn') and 'Smooth' or 'Snap',
++            function() set(controls,'SmoothTurn',not controls:get('SmoothTurn')) end)
++        step(content,y+60,'Snap Angle',controls,'SnapTurnRate',30,15,15,90,'%.0f degrees')
++        local speed=number(controls,'SmoothTurnSensitivity',math.rad(120),math.rad(30),math.rad(240))
++        row(content,y+120,'Smooth Speed',string.format('%.0f degrees / s',math.deg(speed)),
++            function() set(controls,'SmoothTurnSensitivity',math.max(math.rad(30),speed-math.rad(15))) end,
++            function() set(controls,'SmoothTurnSensitivity',math.min(math.rad(240),speed+math.rad(15))) end)
++        content[#content+1]=label('Snap is the distributed default. Personal uses smooth 120.',24,y+200,820,20)
++    elseif activeTab==2 then
++        nativeToggle(content,y,'Dominant Hand','left handed mode','Right','Left')
++        nativeToggle(content,y+60,'Movement Direction','hand directed movement','Head','Hand')
++        nativeToggle(content,y+120,'Controller Haptics','haptics enabled')
++        content[#content+1]=label('Physical Menu and View retain their system roles.',24,y+200,820,20)
++    elseif activeTab==3 then
++        step(content,y,'Menu Scale',prefs,'menu_scale',1,0.1,0.7,1.5,'%.1f x')
++        step(content,y+60,'HUD Scale',prefs,'hud_scale',1,0.1,0.7,1.5,'%.1f x')
++        step(content,y+120,'Menu Distance',prefs,'menu_distance',1,0.1,0.6,2,'%.1f m')
++        local positions={'LeftWristTop','RightWristTop','HUDTopLeft','HUDTopRight','HUDBottomLeft','HUDBottomRight'}
++        local current=spaces:get('HUDSpace') or positions[1]
++        toggle(content,y+180,'HUD Location',current,function()
++            local index=1
++            for n,p in ipairs(positions) do if p==current then index=n%#positions+1 end end
++            set(spaces,'HUDSpace',positions[index])
++        end)
++    elseif activeTab==4 then
++        content[#content+1]=label('Graphics options use OpenMW\'s existing settings window.',24,y,820,22)
++        addButton(content,'Open Graphics Settings',24,y+65,function() vr._frameOpenOptions() end)
++        content[#content+1]=label('Eye resolution is configured at startup.',24,y+140,820,22)
++    elseif activeTab==5 then
++        nativeToggle(content,y,'3D Crosshairs','show 3D crosshairs')
++        toggle(content,y+60,'Physical Sneak',controls:get('PhysicalSneak') and 'On' or 'Off',
++            function() set(controls,'PhysicalSneak',not controls:get('PhysicalSneak')) end)
++        addButton(content,'Open Audio Settings',24,y+130,function() vr._frameOpenOptions() end)
++    elseif activeTab==6 then
++        addButton(content,'Recenter',24,y,function() vr._recenterXY() end)
++        addButton(content,'Calibrate Height',260,y,function() vr._recenterXY(); vr._recenterZ() end)
++        content[#content+1]=label('Calibrate in your seated or standing playing position.',24,y+90,820,22)
++        content[#content+1]=label('Recenter preserves height; calibration resets the vertical origin.',24,y+140,820,22)
++    end
++    addButton(content,profile()=='frame_personal' and 'Profile: Personal' or 'Profile: Standard',24,455,function()
++        prefs:set('defaults_profile',profile()=='standard' and 'frame_personal' or 'standard')
++        turnDefaults()
++    end)
++    if activeTab ~= 4 and activeTab ~= 6 then addButton(content,'Tab Defaults',390,455,defaults) end
++    addButton(content,'Back',740,455,close)
++    content[#content+1]=label('Changes apply immediately and are saved.  D-pad: select   A: change   B: back',24,520,840,18)
++    panel=ui.create{template=I.MWUI.templates.boxSolidThick,layer='MainMenu',
++        props={relativePosition=V2(0.5,0.5),anchor=V2(0.5,0.5),size=V2(890,560)},content=ui.content(content)}
++    dirty=false
++end
++-- OpenXR triggers are distinct from SDL controller events. Keep the established
++-- PointerActivate hit-testing path; MenuSelect activates keyboard-style selection.
++local function navigate(delta)
++    if not panel then return end
++    selected=(selected-1+delta)%#buttons+1
++    dirty=true
++end
++local function registerTriggerHandlers()
++    for key,delta in pairs({MenuUp=-1,MenuLeft=-1,MenuDown=1,MenuRight=1}) do
++        if input.triggers[key] then
++            input.registerTriggerHandler(key,async:callback(function() navigate(delta) end))
++        end
++    end
++    if input.triggers.MenuSelect then
++        input.registerTriggerHandler('MenuSelect',async:callback(function()
++            if panel and not pointerFocus and buttons[selected] then buttons[selected].callback() end
++        end))
++    end
++    -- MenuBack already calls native WindowBase::exit(), which restores the origin.
++end
++registerTriggerHandlers()
++I.vrinputs.addMenuTriggersHeartBeatListener(registerTriggerHandlers)
++return {engineHandlers={
++    onFrame=function()
++        if not vr._frameSettingsActive() then
++            if panel then
++                for _,b in ipairs(buttons) do b.alive=false; b:cleanup() end
++                panel:destroy(); panel=nil; buttons={}
++            end
++            return
++        end
++        if not panel or dirty then rebuild() end
++    end,
++    onControllerButtonPress=function(id)
++        if not panel then return end
++        local b=input.CONTROLLER_BUTTON
++        if id==b.B or id==b.Back then close()
++        elseif id==b.DPadDown or id==b.DPadRight then selected=selected%#buttons+1; dirty=true
++        elseif id==b.DPadUp or id==b.DPadLeft then selected=(selected-2)%#buttons+1; dirty=true
++        elseif id==b.A and buttons[selected] then buttons[selected].callback() end
++    end,
++    onKeyPress=function(key)
++        if panel and key.code==input.KEY.Escape then close() end
++    end,
++}}
+diff --git a/files/data/scripts/omw/vr/ui/menu.lua b/files/data/scripts/omw/vr/ui/menu.lua
+index e7655ac..b489e23 100644
+--- a/files/data/scripts/omw/vr/ui/menu.lua
++++ b/files/data/scripts/omw/vr/ui/menu.lua
+@@ -8,6 +8,12 @@ local core = require('openmw.core')
+ local ui = require('openmw.ui')
+ local I = require('openmw.interfaces')
+ local common = require('scripts.omw.vr.ui.common')
++local frameSettings = require('openmw.storage').playerSection('SettingsFrameVR')
++local function frameNumber(key, fallback, lo, hi)
++    local v=frameSettings:get(key)
++    if type(v)~='number' or v~=v or math.abs(v)==math.huge then return fallback end
++    return math.max(lo,math.min(hi,v))
++end
+ 
+ 
+ 
+@@ -170,7 +176,7 @@ local function createDefaultConfig(backgroundOpacity, autosize)
+         backgroundOpacity = backgroundOpacity,
+         center = util.vector2(0,0),
+         extent = util.vector2(1,1),
+-        pixelsPerMeter = 768,
++        pixelsPerMeter = 768 / frameNumber('menu_scale', 1, 0.7, 1.5),
+         pixelResolution = util.vector2(1024, 1024),
+         autosize = autosize,
+     }
+@@ -385,6 +391,7 @@ local function setupDefaults()
+     layerConfig.HUD = createDefaultConfig(0, true)
+ 
+     for layer, config in pairs(layerConfig) do
++        config.pixelsPerMeter = 768 / frameNumber(layer == 'HUD_3D' and 'hud_scale' or 'menu_scale', 1, 0.7, 1.5)
+         setLayerConfigIfNotOverridden(layer, config)
+     end
+ end
+@@ -512,11 +519,27 @@ end
+ local wasKBMouseMode = false
+ local wasPaused = false
+ local updateOnce = true
++local lastFrameMenuScale, lastFrameHudScale, lastFrameDistance
+ local function onVRFrame()
+     if not initialized then
+         init()
+     end
+ 
++    local menuScale = frameNumber('menu_scale', 1, 0.7, 1.5)
++    local hudScale = frameNumber('hud_scale', 1, 0.7, 1.5)
++    local distance = frameSettings:get('menu_distance') ~= nil and frameNumber('menu_distance', 1, 0.6, 2) or nil
++    if menuScale ~= lastFrameMenuScale or hudScale ~= lastFrameHudScale or distance ~= lastFrameDistance then
++        updateOnce = true
++        if distance then
++            local section = require('openmw.storage').playerSection(common.spaceOffsetGroupKey)
++            local offset = section:getCopy('DefaultWindowOffset') or {}
++            local p = offset.position or util.vector3(0, 0, 0)
++            offset.position = util.vector3(p.x, (distance - 1) * I.vrspaces.unitsPerMeter, p.z)
++            section:set('DefaultWindowOffset', offset)
++            I.vrspaces.offsetDerivedSpace('DefaultWindow', offset)
++        end
++        lastFrameMenuScale, lastFrameHudScale, lastFrameDistance = menuScale, hudScale, distance
++    end
+     local KBMouseMode = I.vrinputs.isKBMouseMode()
+     if KBMouseMode ~= wasKBMouseMode then
+         updateOnce = true

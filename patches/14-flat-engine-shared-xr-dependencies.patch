@@ -1,0 +1,33 @@
+diff --git a/components/CMakeLists.txt b/components/CMakeLists.txt
+--- a/components/CMakeLists.txt
++++ b/components/CMakeLists.txt
+@@ -518,7 +518,7 @@
+         )
+ endif()
+ 
+-if(BUILD_OPENMW_VR)
++if(BUILD_OPENMW OR BUILD_OPENMW_VR OR BUILD_OPENMW_TESTS)
+     add_component_dir(vr
+         actionmanager
+         actionset
+@@ -786,7 +786,7 @@
+     )
+ endif()
+   
+-if(BUILD_OPENMW_VR)
++if(BUILD_OPENMW OR BUILD_OPENMW_VR OR BUILD_OPENMW_TESTS)
+     target_link_libraries(components openxr_loader)
+ 
+     # Preprocessor variables used to control code paths to vr code
+diff --git a/extern/CMakeLists.txt b/extern/CMakeLists.txt
+--- a/extern/CMakeLists.txt
++++ b/extern/CMakeLists.txt
+@@ -299,7 +299,7 @@
+ 
+ # Note: This must be placed after OpenSceneGraph to avoid a target name collision on "uninstall", 
+ # as OSG does not check that this target doesn't already exist.
+-if(BUILD_OPENMW_VR)
++if(BUILD_OPENMW OR BUILD_OPENMW_VR OR BUILD_OPENMW_TESTS)
+     ########### Import the OpenXR SDK
+     # The openxr-sdk doesn't check the version of system jsoncpp so force it to build its bundled version to avoid errors.
+     # We have to set this policy otherwise cmake will ignore any options we try to set for the openxr build

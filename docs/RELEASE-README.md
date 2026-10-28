@@ -1,59 +1,32 @@
-# OpenMW-VR for the Steam Frame — prebuilt aarch64 release
+# OpenMW Frame — ARM64 Linux package
 
-A native ARM64 build of [OpenMW-VR](https://gitlab.com/madsbuvi/openmw) (OpenMW with OpenXR VR support,
-by Mads Buvik Sandvei) that runs standalone on Valve's Steam Frame under SteamOS. It talks to SteamVR's
-native ARM64 OpenXR runtime directly: no PC, no streaming, no x86 emulation.
+Run `./setup.sh` on the Steam Frame with Steam running, then launch **OpenMW
+Frame** from the Steam library. You must own Morrowind; Steam app 22320 is detected
+across its libraries. No game data is included.
 
-You need:
+For another installation: `./setup.sh --morrowind-dir "/path/to/Morrowind"`.
+The path can also name the `Data Files` directory. Only installed expansions are
+enabled, in Morrowind / Tribunal / Bloodmoon order.
 
-- a Steam Frame on SteamOS 0.4.x (`BUILDINFO.txt` names the exact build this was made on)
-- The Elder Scrolls III: Morrowind from Steam (app 22320) installed on the headset
-- a terminal on the headset (SSH, or Konsole in Desktop Mode)
+The installer verifies SHA256SUMS, ARM64 architecture and shared-library
+availability. Keep this directory installed: the persistent launcher points here.
+Run setup again after moving the directory. Reinstallation preserves settings and
+saves. Configuration is in `~/.config/openmw-frame`, saves in
+`~/.local/share/openmw-frame/saves`, respecting XDG overrides.
 
-## Install
+Use `--import-saves PATH` to copy saves from another OpenMW profile without
+replacing existing files. The original profile is preserved. Use `--no-steam`
+when configuring without adding a shortcut.
 
-1. Copy the tarball to the headset and unpack it into `~/openmw-vr`:
+The package includes engine binaries/resources, private non-driver libraries,
+source patches, notices and build metadata. See BUILDINFO.txt and LIBRARIES.json.
+Graphics drivers, glibc and SteamVR’s OpenXR runtime come from SteamOS. Missing
+libraries or checksum failures stop installation.
 
-   ```sh
-   mkdir -p ~/openmw-vr
-   tar -C ~/openmw-vr -xJf openmw-vr-0.51-rc1-steamframe-aarch64.tar.xz
-   ```
+Source: https://github.com/astromaddie/openmw-vr-steam-frame . The corresponding
+patched engine-source archive accompanies the binary archive. Upstream engine:
+https://gitlab.com/madsbuvi/openmw at the commit named in BUILDINFO.txt.
 
-2. With Steam running on the headset, run the setup script:
-
-   ```sh
-   ~/openmw-vr/openmw-vr-0.51-rc1-steamframe-aarch64/setup.sh
-   ```
-
-   It checks that every library resolves, points OpenMW at Steam's Morrowind install
-   (`~/.config/openmw/openmw.cfg`), writes recommended settings (`~/.config/openmw/settings.cfg`), creates
-   the launcher `~/openmw-vr/OpenMW-VR` and adds it to your Steam library. Files that already exist are
-   left alone.
-
-3. In the headset, launch **OpenMW-VR** from the Steam library (it is listed with non-Steam games).
-
-## If setup.sh reports missing libraries
-
-This release uses SteamOS's own libraries (FFmpeg, ICU, LuaJIT, SDL2, OpenAL and others). A SteamOS update
-can replace them with versions this build was not linked against. In that case build from source with the
-[openmw-vr-steam-frame](https://github.com/stephen-moskal/openmw-vr-steam-frame) scripts (about 45 minutes on the headset).
-
-## Contents
-
-| Path | What it is |
-|---|---|
-| `openmw_vr` | OpenMW-VR, the VR game |
-| `openmw` | the same engine without VR (flat screen) |
-| `openmw-iniimporter` | imports Morrowind.ini settings; setup.sh uses it |
-| `openmw.cfg`, `defaults.bin`, `resources/`, ... | engine data; the release runs in place |
-| `setup.sh` | the one-time setup described above |
-| `patches/` | the changes made to the upstream source for the Frame |
-| `licenses/` | OpenMW (GPL-3.0) and the libraries linked in statically |
-| `BUILDINFO.txt` | exact source revision and build environment |
-
-## Source
-
-OpenMW-VR is licensed under the GPL-3.0. This build is the upstream tag named in `BUILDINFO.txt` with the
-patches in `patches/` applied. The build scripts and full documentation are at
-https://github.com/stephen-moskal/openmw-vr-steam-frame. Morrowind's game data is not included; you need
-your own copy.
+This is a development package until the published validation record satisfies the
+72 rendered fps / 1728² release gate. Select the documented refresh rate in
+SteamVR’s per-title settings. Compositor reprojection does not establish that gate.

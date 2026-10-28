@@ -6,7 +6,7 @@
 #   progress: tail -f $ROOT/logs/build.log
 #   result:   $ROOT/logs/status  (RUNNING, OK, or FAILED <exit code>)
 #
-# Environment overrides: ROOT, JOBS (parallel compile jobs, default 4), REF (git tag to build).
+# Environment overrides: ROOT, JOBS (parallel compile jobs, default 2).
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,17 +15,20 @@ ROOT=${ROOT:-$HOME/openmw-vr}
 DEPS=$ROOT/deps    # Boost install prefix
 SRC=$ROOT/src      # OpenMW-VR checkout
 BUILD=$ROOT/build
-JOBS=${JOBS:-4}   # 6 is faster, but see docs/BUILDING.md on memory pressure
+JOBS=${JOBS:-2}
 # Latest OpenMW-VR release. The openmw-vr branch the install docs point at stops at the upstream 0.51
 # merge and lacks the fixes made for this release (e.g. upside-down, misplaced VR menus).
-REF=${REF:-openmw-vr-0.51-rc1}
+REF=openmw-vr-0.51-rc1
+SOURCE_COMMIT=56a8e01390507375c9c2f2593e1c09e0df88c505
 BOOST_VER=1.83.0   # matches SteamOS's boost-libs runtime
 BOOST_DIR=boost_${BOOST_VER//./_}
+BOOST_SHA256=c0685b68dd44cc46574cce86c4e17c0f611b15e195be9848dfd0769a0a207628
 
 mkdir -p "$ROOT/logs" "$ROOT/dl"
 exec >>"$ROOT/logs/build.log" 2>&1
 step() { echo; echo "=== $(date '+%F %T') $*"; }
-trap 'rc=$?; step "FAILED (exit $rc)"; echo "FAILED $rc" >"$ROOT/logs/status"' ERR
+failed() { local rc=$?; step "FAILED (exit $rc)"; echo "FAILED $rc" >"$ROOT/logs/status"; }
+trap failed ERR
 echo RUNNING >"$ROOT/logs/status"
 
 # SteamOS ships the Boost runtime libraries but no headers or CMake config. OpenMW needs only
@@ -37,6 +40,7 @@ if [ ! -f "$DEPS/lib/cmake/Boost-$BOOST_VER/BoostConfig.cmake" ]; then
         curl -fL --retry 3 -o "$BOOST_DIR.tar.gz" \
             "https://archives.boost.io/release/$BOOST_VER/source/$BOOST_DIR.tar.gz"
     fi
+    printf '%s  %s\n' "$BOOST_SHA256" "$BOOST_DIR.tar.gz" | sha256sum -c -
     rm -rf "$BOOST_DIR"
     tar xzf "$BOOST_DIR.tar.gz"
     cd "$BOOST_DIR"
@@ -44,23 +48,18 @@ if [ ! -f "$DEPS/lib/cmake/Boost-$BOOST_VER/BoostConfig.cmake" ]; then
     ./b2 -j"$JOBS" link=static variant=release threading=multi cxxflags=-fPIC -sNO_COMPRESSION=1 install
 fi
 
-if [ ! -d "$SRC/.git" ]; then
+if [ ! -e "$SRC/.git" ]; then
     step "Clone $REF"
     git clone --depth 1 --branch "$REF" https://gitlab.com/madsbuvi/openmw.git "$SRC"
-elif [ "$(git -C "$SRC" describe --tags --exact-match 2>/dev/null || true)" != "$REF" ]; then
-    # Discards local changes to the checkout; the patches below are re-applied.
-    step "Switch source to $REF"
-    git -C "$SRC" fetch --depth 1 origin tag "$REF"
-    git -C "$SRC" checkout -f "$REF"
+fi
+if [ "$(git -C "$SRC" rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+    echo "Source is not pinned commit $SOURCE_COMMIT. Use a fresh ROOT; existing source was preserved." >&2
+    exit 1
 fi
 
 # Source fixes for the Frame, one topic per patch (each file starts with a description), in order.
-for p in "$PATCHES"/*.patch; do
-    if ! git -C "$SRC" apply --reverse --check "$p" 2>/dev/null; then
-        step "Patch: apply $(basename "$p")"
-        git -C "$SRC" apply "$p"
-    fi
-done
+(cd "$REPO_DIR" && sha256sum patches/*.patch) > "$ROOT/logs/build-patches.sha256"
+python3 "$REPO_DIR/scripts/prepare_source.py" "$SRC" "$PATCHES" "$SOURCE_COMMIT"
 
 # OSG, Bullet, MyGUI, yaml-cpp, recastnavigation and the OpenXR loader aren't packaged on SteamOS,
 # so OpenMW's CMake downloads and builds them statically. The Qt tools (launcher, editor, wizard)
@@ -82,6 +81,11 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
 # -k 0: keep compiling past failures so every broken file shows up in one pass.
 step "Build (-j$JOBS)"
 cmake --build "$BUILD" -j "$JOBS" -- -k 0
+cmp "$ROOT/logs/build-patches.sha256" <(cd "$REPO_DIR" && sha256sum patches/*.patch)
 
 step "DONE"
+git -C "$SRC" diff --binary > "$ROOT/logs/applied-source.patch"
+git -C "$SRC" rev-parse HEAD > "$ROOT/logs/source-commit"
+python3 "$REPO_DIR/scripts/source_manifest.py" "$SRC" "$ROOT/logs/source-sha256.json"
+printf '%s\n' "${OPENMW_FRAME_BUILD_IMAGE_ID:-native-build}" > "$ROOT/logs/builder-image.txt"
 echo OK >"$ROOT/logs/status"

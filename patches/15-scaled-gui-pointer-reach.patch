@@ -1,0 +1,246 @@
+diff --git a/apps/openmw/mwvr/guipointer.hpp b/apps/openmw/mwvr/guipointer.hpp
+new file mode 100644
+index 0000000..bb59b8f
+--- /dev/null
++++ b/apps/openmw/mwvr/guipointer.hpp
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include "../mwrender/vismask.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++
++namespace MWVR::Util
++{
++    inline float guiPointerScale(float scale)
++    {
++        return std::isfinite(scale) ? std::clamp(scale, .25f, 4.f) : 1.f;
++    }
++
++    inline float guiPointerReach(float scale, float unitsPerMeter)
++    {
++        // Maximum configured menu distance is 2 physical metres. Reserve one
++        // metre for the hand behind the head, panel tilt and lateral aiming.
++        return 3.f * unitsPerMeter * guiPointerScale(scale);
++    }
++
++    inline float pointerWidth(bool guiHit, float scale)
++    {
++        return .25f * (guiHit ? guiPointerScale(scale) : 1.f);
++    }
++
++    // Separate query results prevent a distant occluder from becoming an
++    // activatable world target. WorldCast retains the native gameplay range.
++    template <class Result, class GuiCast, class OcclusionCast, class WorldCast>
++    float targetWithGui(Result& result, bool guiMode, uint32_t ignoreMask,
++        float scale, float unitsPerMeter, GuiCast guiCast, OcclusionCast occlusionCast, WorldCast worldCast)
++    {
++        if (guiMode && !(ignoreMask & MWRender::Mask_3DGUI))
++        {
++            Result gui{};
++            const float distance = guiCast(gui, guiPointerReach(scale, unitsPerMeter));
++            if (gui.mHit)
++            {
++                Result occluder{};
++                const float occlusionDistance = occlusionCast(occluder, distance, ignoreMask | MWRender::Mask_3DGUI);
++                if (!occluder.mHit || occlusionDistance >= distance)
++                {
++                    result = gui;
++                    return distance;
++                }
++            }
++            // The GUI query already handled all selectable GUI. The fallback
++            // must not accidentally select one through an occluding wall.
++            return worldCast(result, ignoreMask | MWRender::Mask_3DGUI);
++        }
++        return worldCast(result, ignoreMask);
++    }
++}
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+index a71940e..25fce9e 100644
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -21,6 +21,9 @@
+ #include <osg/Material>
+ #include <osg/Texture2D>
+ 
++#include <osgUtil/IntersectionVisitor>
++#include <osgUtil/LineSegmentIntersector>
++
+ #include <osgViewer/Renderer>
+ #include <osgViewer/Viewer>
+ 
+@@ -946,6 +949,37 @@ namespace MWVR
+             it.second->updatePose();
+     }
+ 
++    float VRGUIManager::castPointerRay(MWRender::RayResult& result, const Stereo::Pose& pose, float maxDistance)
++    {
++        std::scoped_lock lock(mMutex);
++        result = {};
++        auto direction = pose.orientation * osg::Vec3f(0, 1, 0);
++        direction.normalize();
++        const auto origin = pose.position.asMWUnits();
++        osg::ref_ptr<osgUtil::LineSegmentIntersector> ray = new osgUtil::LineSegmentIntersector(
++            osgUtil::LineSegmentIntersector::MODEL, origin, origin + direction * maxDistance);
++        ray->setIntersectionLimit(osgUtil::LineSegmentIntersector::LIMIT_NEAREST);
++        osgUtil::IntersectionVisitor visitor(ray.get());
++        // This dedicated group contains world-positioned GUI transforms only;
++        // it excludes the sibling RTT camera and all world-object subtrees.
++        // Non-pickable layers have Mask_3DGUI_NonIntersectable, not Mask_3DGUI.
++        visitor.setTraversalMask(MWRender::Mask_3DGUI);
++        mGeometries->accept(visitor);
++        if (!ray->containsIntersections())
++            return 0.f;
++        const auto& hit = ray->getFirstIntersection();
++        auto* geometry = hit.drawable.get();
++        if (!geometry || !dynamic_cast<VRGUILayerUserData*>(geometry->getUserData()))
++            return 0.f;
++        result.mHit = true;
++        result.mHitNode = geometry;
++        result.mHitPointWorld = hit.getWorldIntersectPoint();
++        result.mHitNormalWorld = hit.getWorldIntersectNormal();
++        result.mHitPointLocal = hit.getLocalIntersectPoint();
++        result.mRatio = static_cast<float>(hit.ratio);
++        return result.mRatio * maxDistance;
++    }
++
+     void VRGUIManager::updateFocus(osg::Node* focusNode, osg::Vec3f hitPoint)
+     {
+         if (focusNode && focusNode->getName() == "VRGUILayer")
+diff --git a/apps/openmw/mwvr/vrgui.hpp b/apps/openmw/mwvr/vrgui.hpp
+index 060ed23..e634ac4 100644
+--- a/apps/openmw/mwvr/vrgui.hpp
++++ b/apps/openmw/mwvr/vrgui.hpp
+@@ -28,6 +28,11 @@ namespace MyGUI
+     class Window;
+ }
+ 
++namespace MWRender
++{
++    struct RayResult;
++}
++
+ namespace MWGui
+ {
+     class Layout;
+@@ -163,6 +168,9 @@ namespace MWVR
+         /// Check current pointer target and update focus layer
+         void updateFocus(osg::Node* focusNode, osg::Vec3f hitPoint);
+ 
++        // Query only visible, pickable GUI geometry in world coordinates.
++        float castPointerRay(MWRender::RayResult& result, const Stereo::Pose& pose, float maxDistance);
++
+         /// True if user is currently pointing at something
+         bool hasFocus() const;
+ 
+diff --git a/apps/openmw/mwvr/vrpointer.cpp b/apps/openmw/mwvr/vrpointer.cpp
+index c788d9d..8c9d1c8 100644
+--- a/apps/openmw/mwvr/vrpointer.cpp
++++ b/apps/openmw/mwvr/vrpointer.cpp
+@@ -1,6 +1,7 @@
+ #include "vrpointer.hpp"
+ #include "vrgui.hpp"
+ #include "vrutil.hpp"
++#include "guipointer.hpp"
+ 
+ #include <osg/BlendFunc>
+ #include <osg/Drawable>
+@@ -219,7 +220,8 @@ namespace MWVR
+                 >= osg::DegreesToRadians(30.f));
+ 
+             mCrosshair->setStretch(mDistanceToPointerTarget / 3.f);
+-            mCrosshair->setWidth(0.25f);
++            const bool guiHit = mPointerRay.mHitNode && mPointerRay.mHitNode->getName() == "VRGUILayer";
++            mCrosshair->setWidth(Util::pointerWidth(guiHit, VR::Session::instance().worldScale()));
+             mCrosshair->setOffset(2.f * mDistanceToPointerTarget / 3.f);
+             mCrosshair->show();
+ 
+diff --git a/apps/openmw/mwvr/vrutil.cpp b/apps/openmw/mwvr/vrutil.cpp
+index 4222c79..54f14d5 100644
+--- a/apps/openmw/mwvr/vrutil.cpp
++++ b/apps/openmw/mwvr/vrutil.cpp
+@@ -1,4 +1,5 @@
+ #include "vrutil.hpp"
++#include "guipointer.hpp"
+ #include "apps/openmw/mwmechanics/creaturestats.hpp"
+ #include "components/esm3/loadmgef.hpp"
+ #include "openxrinput.hpp"
+@@ -65,35 +66,48 @@ namespace MWVR
+             auto wm = MWBase::Environment::get().getWindowManager();
+             auto world = MWBase::Environment::get().getWorld();
+ 
+-            if (wm->isGuiMode() && wm->isConsoleMode())
+-                return world->getTargetObject(result, pose.position.asMWUnits(), pose.orientation,
+-                    world->getMaxActivationDistance() * 50, true, ignoreMask);
+-            else
+-            {
+-                float activationDistance = world->getMaxActivationDistance();
+-                if (allowTelekinesis)
+-                {
+-                    auto player = MWMechanics::getPlayer();
+-                    const float telekinesisMagnitude = player.getClass()
+-                                                           .getCreatureStats(player)
+-                                                           .getMagicEffects()
+-                                                           .getOrDefault(ESM::MagicEffect::Telekinesis)
+-                                                           .getMagnitude();
+-                    activationDistance += std::ceil(Constants::UnitsPerFoot) * telekinesisMagnitude;
+-                }
++            return targetWithGui(result, wm->isGuiMode(), ignoreMask,
++                VR::Session::instance().worldScale(), Constants::UnitsPerMeter,
++                [&](MWRender::RayResult& guiResult, float reach) {
++                    return VRGUIManager::instance().castPointerRay(guiResult, pose, reach);
++                },
++                [&](MWRender::RayResult& occluder, float reach, uint32_t mask) {
++                    // Occlusion only: never expose this extended world hit as
++                    // the activation/drop target. GUI uses ordinary scene depth.
++                    return world->getTargetObject(occluder, pose.position.asMWUnits(), pose.orientation,
++                        reach, true, mask);
++                },
++                [&](MWRender::RayResult& result, uint32_t worldIgnoreMask) {
++                    if (wm->isGuiMode() && wm->isConsoleMode())
++                        return world->getTargetObject(result, pose.position.asMWUnits(), pose.orientation,
++                            world->getMaxActivationDistance() * 50, true, worldIgnoreMask);
++                    else
++                    {
++                        float activationDistance = world->getMaxActivationDistance();
++                        if (allowTelekinesis)
++                        {
++                            auto player = MWMechanics::getPlayer();
++                            const float telekinesisMagnitude = player.getClass()
++                                                                   .getCreatureStats(player)
++                                                                   .getMagicEffects()
++                                                                   .getOrDefault(ESM::MagicEffect::Telekinesis)
++                                                                   .getMagnitude();
++                            activationDistance += std::ceil(Constants::UnitsPerFoot) * telekinesisMagnitude;
++                        }
+ 
+-                auto distance = world->getTargetObject(
+-                    result, pose.position.asMWUnits(), pose.orientation, activationDistance, true, ignoreMask);
++                        auto distance = world->getTargetObject(
++                            result, pose.position.asMWUnits(), pose.orientation, activationDistance, true, worldIgnoreMask);
+ 
+-                if (!result.mHitObject.isEmpty() && !result.mHitObject.getClass().allowTelekinesis(result.mHitObject)
+-                    && distance > activationDistance && !MWBase::Environment::get().getWindowManager()->isGuiMode())
+-                {
+-                    result.mHit = false;
+-                    result.mHitObject = nullptr;
+-                    distance = 0.f;
+-                };
+-                return distance;
+-            }
++                        if (!result.mHitObject.isEmpty() && !result.mHitObject.getClass().allowTelekinesis(result.mHitObject)
++                            && distance > activationDistance && !MWBase::Environment::get().getWindowManager()->isGuiMode())
++                        {
++                            result.mHit = false;
++                            result.mHitObject = nullptr;
++                            distance = 0.f;
++                        };
++                        return distance;
++                    }
++                });
+         }
+ 
+         Stereo::Pose getNodePose(const osg::Node* node)

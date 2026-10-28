@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shlex
@@ -94,8 +95,17 @@ def check_binary(build):
     env = os.environ.copy()
     env['LD_LIBRARY_PATH'] = str(build / 'lib') + ':' + env.get('LD_LIBRARY_PATH', '')
     result = subprocess.run(['ldd', str(binary)], env=env, text=True, capture_output=True)
-    if result.returncode or 'not found' in result.stdout:
+    if result.returncode or 'not found' in result.stdout + result.stderr:
         raise ValueError('Runtime library check failed:\n' + result.stdout + result.stderr)
+
+
+def check_host():
+    if platform.machine().lower() not in ('aarch64', 'arm64'):
+        raise ValueError('Run setup on the ARM64 Steam Frame; use install_remote.py from another computer')
+    release = platform.freedesktop_os_release()
+    if release.get('ID') != 'steamos' or release.get('VARIANT_ID') != 'vr':
+        raise ValueError('Expected the SteamOS VR variant on the Steam Frame')
+    print('Verified target: ARM64 SteamOS VR', release.get('VERSION_ID', ''))
 
 
 def import_saves(source, destination):
@@ -176,6 +186,7 @@ def main():
     here = Path(__file__).resolve().parent
     build = (args.build_dir or (here if (here / 'openmw_vr').exists() else Path.home() / 'openmw-vr/build')).resolve()
     try:
+        check_host()
         verify_package(build)
         check_binary(build)
         data = find_data(Path.home(), args.morrowind_dir)

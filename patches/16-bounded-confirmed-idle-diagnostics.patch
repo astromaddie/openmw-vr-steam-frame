@@ -1,0 +1,43 @@
+diff --git a/components/xr/session.cpp b/components/xr/session.cpp
+--- a/components/xr/session.cpp
++++ b/components/xr/session.cpp
+@@ -1,4 +1,5 @@
+ #include "session.hpp"
++#include "diagnosticguard.hpp"
+ #include "debug.hpp"
+ #include "instance.hpp"
+ #include "swapchain.hpp"
+@@ -110,7 +111,10 @@
+ 
+         if (mFrameForceRender)
+         {
+-            if (mState == XR_SESSION_STATE_SYNCHRONIZED || mState == XR_SESSION_STATE_VISIBLE)
++            if (mState == XR_SESSION_STATE_SYNCHRONIZED || mState == XR_SESSION_STATE_VISIBLE
++                || (mState == XR_SESSION_STATE_FOCUSED
++                    && boundedConfirmedIdleDiagnostic(std::getenv("OPENMW_FRAME_CONFIRMED_IDLE"),
++                        std::getenv("OPENMW_FRAME_DIAGNOSTIC_EXIT_SECONDS"))))
+             {
+                 shouldRender = true;
+                 mFrameDiagnosticSyntheticViewsActive = true;
+diff --git a/components/xr/diagnosticguard.hpp b/components/xr/diagnosticguard.hpp
+new file mode 100644
+--- /dev/null
++++ b/components/xr/diagnosticguard.hpp
+@@ -0,0 +1,17 @@
++#pragma once
++#include <cmath>
++#include <cstdlib>
++#include <string_view>
++
++namespace XR
++{
++    // Explicitly confirmed idle diagnostics stay offscreen, input-free and bounded.
++    inline bool boundedConfirmedIdleDiagnostic(const char* confirmation, const char* duration)
++    {
++        if (!confirmation || std::string_view(confirmation) != "1" || !duration || !*duration)
++            return false;
++        char* end = nullptr;
++        const double seconds = std::strtod(duration, &end);
++        return end != duration && *end == '\0' && std::isfinite(seconds) && seconds > 0.0 && seconds <= 60.0;
++    }
++}

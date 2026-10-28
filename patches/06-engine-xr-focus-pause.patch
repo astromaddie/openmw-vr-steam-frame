@@ -1,0 +1,109 @@
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index e506769..7e7e661 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -108,6 +108,8 @@
+ 
+ namespace
+ {
++    constexpr char XRFocusPauseTag[] = "OpenMW/XRFocusLost";
++
+     std::optional<std::chrono::duration<double>> frameDiagnosticExitDelay()
+     {
+         const char* setting = std::getenv("OPENMW_FRAME_DIAGNOSTIC_EXIT_SECONDS");
+@@ -279,6 +281,24 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
+             mInputManager->update(frametime, false);
+         }
+ 
++        const auto focusPauseTransition = mXrFocusPause.update(static_cast<bool>(mXrSession),
++            mXrSession && mXrSession->isDiagnosticMode(), mXrSession && mXrSession->shouldReadInput());
++        if (focusPauseTransition != MWVR::FocusPauseController::Transition::None)
++        {
++            MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
++            if (focusPauseTransition == MWVR::FocusPauseController::Transition::Pause)
++            {
++                timeManager.pause(XRFocusPauseTag);
++                mSoundManager->pauseSounds(MWSound::XRFocus);
++            }
++            else
++            {
++                timeManager.unpause(XRFocusPauseTag);
++                mSoundManager->resumeSounds(MWSound::XRFocus);
++            }
++            timeManager.updateIsPaused();
++        }
++
+         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
+         // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
+         // changing widget textures (fixed in MyGUI 3.3.2), and destroyed widgets will not be deleted (not fixed yet,
+diff --git a/apps/openmw/engine.hpp b/apps/openmw/engine.hpp
+index 160e1ea..9050136 100644
+--- a/apps/openmw/engine.hpp
++++ b/apps/openmw/engine.hpp
+@@ -14,6 +14,7 @@
+ #include <osgViewer/ViewerEventHandlers>
+ 
+ #include "mwbase/environment.hpp"
++#include "mwvr/focuspause.hpp"
+ 
+ namespace Resource
+ {
+@@ -305,6 +306,7 @@ namespace OMW
+         std::unique_ptr<XR::Instance> mXrInstance;
+         std::shared_ptr<XR::Session> mXrSession;
+         std::unique_ptr<VR::Viewer> mVrViewer;
++        MWVR::FocusPauseController mXrFocusPause;
+ //## VR_PATCH END
+     };
+ }
+diff --git a/apps/openmw/mwbase/soundmanager.hpp b/apps/openmw/mwbase/soundmanager.hpp
+index 9b6b579..136ff07 100644
+--- a/apps/openmw/mwbase/soundmanager.hpp
++++ b/apps/openmw/mwbase/soundmanager.hpp
+@@ -27,6 +27,7 @@ namespace MWSound
+     enum BlockerType
+     {
+         VideoPlayback,
++        XRFocus,
+ 
+         MaxCount
+     };
+diff --git a/apps/openmw/mwvr/focuspause.hpp b/apps/openmw/mwvr/focuspause.hpp
+new file mode 100644
+index 0000000..3900aeb
+--- /dev/null
++++ b/apps/openmw/mwvr/focuspause.hpp
+@@ -0,0 +1,33 @@
++#ifndef OPENMW_MWVR_FOCUSPAUSE_H
++#define OPENMW_MWVR_FOCUSPAUSE_H
++
++namespace MWVR
++{
++    class FocusPauseController
++    {
++    public:
++        enum class Transition
++        {
++            None,
++            Pause,
++            Resume
++        };
++
++        Transition update(bool hasXrSession, bool diagnosticMode, bool focused)
++        {
++            const bool shouldPause = hasXrSession && !diagnosticMode && !focused;
++            if (shouldPause == mPaused)
++                return Transition::None;
++
++            mPaused = shouldPause;
++            return mPaused ? Transition::Pause : Transition::Resume;
++        }
++
++        bool isPaused() const { return mPaused; }
++
++    private:
++        bool mPaused = false;
++    };
++}
++
++#endif

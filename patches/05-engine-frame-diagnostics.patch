@@ -1,0 +1,864 @@
+diff --git a/apps/openmw/engine.cpp b/apps/openmw/engine.cpp
+index 43405c4..e506769 100644
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -2,8 +2,12 @@
+ 
+ #include <cerrno>
+ #include <chrono>
++#include <cmath>
++#include <cstdlib>
+ #include <future>
++#include <optional>
+ #include <system_error>
++#include <utility>
+ 
+ #include <osgDB/ReaderWriter>
+ #include <osgDB/Registry>
+@@ -104,6 +108,45 @@
+ 
+ namespace
+ {
++    std::optional<std::chrono::duration<double>> frameDiagnosticExitDelay()
++    {
++        const char* setting = std::getenv("OPENMW_FRAME_DIAGNOSTIC_EXIT_SECONDS");
++        if (!setting || !*setting)
++            return std::nullopt;
++
++        char* end = nullptr;
++        errno = 0;
++        const double seconds = std::strtod(setting, &end);
++        constexpr double maximumSeconds = 24.0 * 60.0 * 60.0;
++        if (errno == ERANGE || end == setting || *end != '\0' || !std::isfinite(seconds) || seconds <= 0.0
++            || seconds > maximumSeconds)
++        {
++            Log(Debug::Warning) << "Ignoring invalid OPENMW_FRAME_DIAGNOSTIC_EXIT_SECONDS value: " << setting;
++            return std::nullopt;
++        }
++        return std::chrono::duration<double>(seconds);
++    }
++
++    uint64_t frameDiagnosticCaptureFrame()
++    {
++        constexpr uint64_t defaultFrame = 300;
++        constexpr unsigned long long maximumFrame = 1000000;
++        const char* setting = std::getenv("OPENMW_FRAME_DIAGNOSTIC_CAPTURE_FRAME");
++        if (!setting || !*setting)
++            return defaultFrame;
++
++        char* end = nullptr;
++        errno = 0;
++        const unsigned long long frame = std::strtoull(setting, &end, 10);
++        if (errno == ERANGE || end == setting || *end != '\0' || frame > maximumFrame)
++        {
++            Log(Debug::Warning) << "Ignoring invalid OPENMW_FRAME_DIAGNOSTIC_CAPTURE_FRAME value: " << setting
++                                << "; using " << defaultFrame;
++            return defaultFrame;
++        }
++        return static_cast<uint64_t>(frame);
++    }
++
+     void checkSDLError(int ret)
+     {
+         if (ret != 0)
+@@ -1135,7 +1178,19 @@ void OMW::Engine::go()
+     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
+     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
+     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
+-    while (!mViewer->done() && !mStateManager->hasQuitRequest())
++    const auto diagnosticExitDelay = frameDiagnosticExitDelay();
++    std::optional<std::chrono::steady_clock::time_point> diagnosticExitDeadline;
++    if (diagnosticExitDelay)
++        diagnosticExitDeadline = std::chrono::steady_clock::now()
++            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(*diagnosticExitDelay);
++    if (diagnosticExitDeadline)
++        Log(Debug::Info) << "Frame diagnostic will exit cleanly after " << diagnosticExitDelay->count() << " seconds";
++    if (mXrSession && mXrSession->isDiagnosticMode())
++        mXrSession->beginDiagnosticCaptureWindow();
++
++    while (!mViewer->done() && !mStateManager->hasQuitRequest()
++        && !(mXrSession && mXrSession->diagnosticRefused())
++        && (!diagnosticExitDeadline || std::chrono::steady_clock::now() < *diagnosticExitDeadline))
+     {
+         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                               std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
+@@ -1176,6 +1231,12 @@ void OMW::Engine::go()
+         frameRateLimiter.limit();
+     }
+ 
++    if (mXrSession && mXrSession->diagnosticRefused())
++        Log(Debug::Warning) << "Frame diagnostic stopped after the XR runtime acquired focus";
++
++    if (diagnosticExitDeadline && std::chrono::steady_clock::now() >= *diagnosticExitDeadline)
++        Log(Debug::Info) << "Frame diagnostic exit deadline reached; leaving the engine loop cleanly";
++
+     mLuaWorker->join();
+ 
+     // Save user settings
+@@ -1289,7 +1350,16 @@ void OMW::Engine::configureVRPreScene(const std::filesystem::path& userFile, boo
+     VR::setLeftHandedMode(Settings::vr().mLeftHandedMode);
+ 
+     // Set up enough of VR to view the intro cinematic/loading screen
+-    mVrViewer = std::make_unique<VR::Viewer>(mXrSession, mViewer);
++    std::filesystem::path diagnosticCaptureDirectory = mCfgMgr.getScreenshotPath() / "frame-diagnostic";
++    if (const char* configuredDirectory = std::getenv("OPENMW_FRAME_DIAGNOSTIC_DIR");
++        configuredDirectory && *configuredDirectory)
++        diagnosticCaptureDirectory = configuredDirectory;
++    const uint64_t diagnosticCaptureFrame = frameDiagnosticCaptureFrame();
++    if (mXrSession && mXrSession->isDiagnosticMode())
++        Log(Debug::Info) << "Frame diagnostic eye and UI layer captures arm after " << diagnosticCaptureFrame
++                         << " rendered frames after the main loop starts";
++    mVrViewer = std::make_unique<VR::Viewer>(mXrSession, mViewer, diagnosticCaptureDirectory,
++        diagnosticCaptureFrame);
+     mVrViewer->configureCallbacks();
+     auto cullMask = ~(MWRender::VisMask::Mask_UpdateVisitor | MWRender::VisMask::Mask_SimpleWater);
+     cullMask &= ~MWRender::VisMask::Mask_GUI;
+@@ -1301,7 +1371,8 @@ void OMW::Engine::configureVRPreScene(const std::filesystem::path& userFile, boo
+ 
+     mInputManager = std::make_unique<MWVR::VRInputManager>(mWindow, mViewer, mScreenCaptureHandler, userFile,
+         userFileExists, userControllerBindingsFile, controllerBindingsFile, mGrab);
+-    mVrGUIManager = std::make_unique<MWVR::VRGUIManager>(mViewer->getSceneData()->asGroup());
++    mVrGUIManager = std::make_unique<MWVR::VRGUIManager>(
++        mViewer->getSceneData()->asGroup(), diagnosticCaptureDirectory, diagnosticCaptureFrame);
+ 
+     // Before the RenderingManager and associated infrastructure is created, we need to render directly into the stereo framebuffer
+     mStereoManager->setShouldAttachMultiviewFramebufferToMainCamera(true);
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+index 6015948..ab97928 100644
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -2,7 +2,11 @@
+ #include "vrinputmanager.hpp"
+ 
+ #include <algorithm>
++#include <cctype>
+ #include <cmath>
++#include <filesystem>
++#include <string_view>
++#include <utility>
+ 
+ #include "openxrinput.hpp"
+ #include "vrpointer.hpp"
+@@ -11,6 +15,7 @@
+ #include <osg/ClipNode>
+ #include <osg/Depth>
+ #include <osg/Fog>
++#include <osg/Image>
+ #include <osg/FrontFace>
+ #include <osg/LightModel>
+ #include <osg/Material>
+@@ -19,6 +24,8 @@
+ #include <osgViewer/Renderer>
+ #include <osgViewer/Viewer>
+ 
++#include <osgDB/WriteFile>
++
+ #include <components/misc/constants.hpp>
+ #include <components/myguiplatform/additivelayer.hpp>
+ #include <components/myguiplatform/myguirendermanager.hpp>
+@@ -60,6 +67,15 @@ namespace MWVR
+ {
+     namespace
+     {
++        std::string diagnosticSafeFilenameComponent(std::string_view name)
++        {
++            std::string result;
++            result.reserve(name.size());
++            for (unsigned char character : name)
++                result.push_back(std::isalnum(character) ? static_cast<char>(character) : '_');
++            return result.empty() ? "unnamed" : result;
++        }
++
+         const static std::set<std ::string> resizableWindowLayers = { "InventoryCompanionWindow", "DialogueWindow",
+             "InventoryWindow", "StatsWindow", "MapWindow", "SpellWindow" };
+ 
+@@ -341,7 +357,7 @@ namespace MWVR
+             removeFromSceneGraph();
+     }
+ 
+-    void VRGUILayer::blitLayer(osg::RenderInfo& info)
++    void VRGUILayer::blitLayer(osg::RenderInfo& info, const std::filesystem::path& diagnosticCapturePath)
+     {
+         if (mVrLayer && mConfig)
+         {
+@@ -367,6 +383,29 @@ namespace MWVR
+ 
+             auto* gl = osg::GLExtensions::Get(state->getContextID(), false);
+             gl->glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++            if (!diagnosticCapturePath.empty())
++            {
++                try
++                {
++                    std::filesystem::create_directories(diagnosticCapturePath.parent_path());
++                    targetFbo->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
++                    gl->glReadBuffer(GL_COLOR_ATTACHMENT0);
++                    osg::ref_ptr<osg::Image> image = new osg::Image;
++                    image->readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE);
++                    image->flipVertical();
++                    if (!osgDB::writeImageFile(*image, diagnosticCapturePath.string()))
++                        Log(Debug::Warning) << "Frame diagnostic could not write rendered UI layer texture: "
++                                            << diagnosticCapturePath;
++                    else
++                        Log(Debug::Info) << "Frame diagnostic wrote rendered UI layer texture " << mLayerName << ": "
++                                         << diagnosticCapturePath;
++                }
++                catch (const std::exception& error)
++                {
++                    Log(Debug::Warning) << "Frame diagnostic failed to capture UI layer texture " << mLayerName << ": "
++                                        << error.what();
++                }
++            }
+             gl->glBindFramebuffer(GL_FRAMEBUFFER_EXT, 0);
+             mVrLayer->colorSwapchain->endFrame(state->getGraphicsContext());
+         }
+@@ -705,8 +744,11 @@ namespace MWVR
+         VRGUIManager* mManager;
+     };
+ 
+-    VRGUIManager::VRGUIManager(osg::Group* rootNode)
++    VRGUIManager::VRGUIManager(osg::Group* rootNode, std::filesystem::path diagnosticCaptureDirectory,
++        uint64_t diagnosticCaptureFrame)
+         : mRootNode(rootNode)
++        , mDiagnosticCaptureDirectory(std::move(diagnosticCaptureDirectory))
++        , mDiagnosticCaptureFrame(diagnosticCaptureFrame)
+     {
+         if (!sManager)
+             sManager = this;
+@@ -848,7 +890,20 @@ namespace MWVR
+         {
+             if (!it.second->visible())
+                 continue;
+-            it.second->blitLayer(info);
++
++            std::filesystem::path diagnosticCapturePath;
++            if (frame.diagnostic && frame.diagnosticFrameNumber > 0
++                && frame.diagnosticFrameNumber >= mDiagnosticCaptureFrame
++                && !mDiagnosticCapturedLayers.contains(it.second->mLayerName))
++            {
++                mDiagnosticCapturedLayers.insert(it.second->mLayerName);
++                const auto fileName = "openmw-frame-diagnostic-synthetic-ui-layer-"
++                    + VR::Viewer::instance().diagnosticCaptureSessionId() + "-frame-"
++                    + std::to_string(frame.diagnosticFrameNumber) + "-"
++                    + diagnosticSafeFilenameComponent(it.second->mLayerName) + ".png";
++                diagnosticCapturePath = mDiagnosticCaptureDirectory / fileName;
++            }
++            it.second->blitLayer(info, diagnosticCapturePath);
+         }
+     }
+ 
+diff --git a/apps/openmw/mwvr/vrgui.hpp b/apps/openmw/mwvr/vrgui.hpp
+index a58b6c7..060ed23 100644
+--- a/apps/openmw/mwvr/vrgui.hpp
++++ b/apps/openmw/mwvr/vrgui.hpp
+@@ -3,6 +3,8 @@
+ 
+ #include <MyGUI_Widget.h>
+ #include <array>
++#include <cstdint>
++#include <filesystem>
+ #include <map>
+ #include <set>
+ #include <mutex>
+@@ -91,7 +93,7 @@ namespace MWVR
+ 
+         bool updateLayer();
+         void updateVisibility();
+-        void blitLayer(osg::RenderInfo& info);
++        void blitLayer(osg::RenderInfo& info, const std::filesystem::path& diagnosticCapturePath = {});
+ 
+         bool visible() const { return mVisible; }
+ 
+@@ -143,7 +145,8 @@ namespace MWVR
+ 
+         static VRGUIManager& instance();
+ 
+-        VRGUIManager(osg::Group* rootNode);
++        VRGUIManager(osg::Group* rootNode, std::filesystem::path diagnosticCaptureDirectory,
++            uint64_t diagnosticCaptureFrame);
+ 
+         ~VRGUIManager(void);
+ 
+@@ -218,6 +221,9 @@ namespace MWVR
+         osg::ref_ptr<VRGUILayer> mFocusLayer = nullptr;
+         MyGUI::Widget* mFocusWidget = nullptr;
+         std::map<std::string, LayerConfig> mDefaultLayerConfigs;
++        std::filesystem::path mDiagnosticCaptureDirectory;
++        uint64_t mDiagnosticCaptureFrame = 300;
++        std::set<std::string> mDiagnosticCapturedLayers;
+ 
+         std::shared_ptr<VR::Session::Listener> mSessionListener;
+         std::mutex mMutex;
+diff --git a/components/vr/frame.hpp b/components/vr/frame.hpp
+index fda9527..de2d851 100644
+--- a/components/vr/frame.hpp
++++ b/components/vr/frame.hpp
+@@ -17,10 +17,14 @@ namespace VR
+ 
+         bool shouldSyncFrameLoop = false;
+         bool shouldRender = false;
++        bool shouldSubmit = false;
+         bool shouldSyncInput = false;
++        bool diagnostic = false;
++        bool diagnosticPerfComparable = false;
+         uint64_t predictedDisplayTime = 0;
+         uint64_t predictedDisplayPeriod = 0;
+         uint64_t frameNumber = 0;
++        uint64_t diagnosticFrameNumber = 0;
+ 
+         std::vector<std::shared_ptr<Layer>> layers;
+     };
+diff --git a/components/vr/session.cpp b/components/vr/session.cpp
+index 8286050..c42b9e6 100644
+--- a/components/vr/session.cpp
++++ b/components/vr/session.cpp
+@@ -65,6 +65,10 @@ namespace VR
+             VR::setPredictedDisplayTime(frame.predictedDisplayTime);
+             VR::setPredictedDisplayPeriod(frame.predictedDisplayPeriod);
+         }
++        frame.shouldSubmit = shouldSubmitFrame(frame.shouldRender);
++        frame.diagnostic = isDiagnosticFrame();
++        frame.diagnosticPerfComparable = frame.diagnostic && isDiagnosticPerfComparable();
++        frame.diagnosticFrameNumber = frame.diagnostic ? diagnosticFrameNumber() : 0;
+         for (auto& listener : mListeners)
+             listener->onFrameUpdate(frame);
+         VR::setLocatingSpacesAllowed(true);
+diff --git a/components/vr/session.hpp b/components/vr/session.hpp
+index ce0cdc5..e491e16 100644
+--- a/components/vr/session.hpp
++++ b/components/vr/session.hpp
+@@ -76,6 +76,10 @@ namespace VR
+         void swapBuffers(osg::GraphicsContext* gc, VR::Frame& frame);
+ 
+         bool appShouldShareDepthInfo() const { return mAppShouldShareDepthBuffer; }
++        virtual bool isDiagnosticFrame() const { return false; }
++        virtual bool isDiagnosticPerfComparable() const { return false; }
++        virtual uint64_t diagnosticFrameNumber() const { return 0; }
++        virtual bool shouldSubmitFrame(bool shouldRender) const { return shouldRender; }
+ 
+         virtual std::shared_ptr<VR::Swapchain> createSwapchain(uint32_t width, uint32_t height, uint32_t samples,
+             uint32_t arraySize, Swapchain::Attachment attachment, const std::string& name)
+diff --git a/components/vr/viewer.cpp b/components/vr/viewer.cpp
+index 75bedcf..95e80a7 100644
+--- a/components/vr/viewer.cpp
++++ b/components/vr/viewer.cpp
+@@ -5,6 +5,7 @@
+ #include <osg/Texture2DArray>
+ #include <osg/VertexArrayState>
+ #include <osgViewer/Renderer>
++#include <osgDB/WriteFile>
+ 
+ #include <components/debug/gldebug.hpp>
+ 
+@@ -28,6 +29,7 @@
+ #include <components/sdlutil/sdlgraphicswindow.hpp>
+ 
+ #include <cassert>
++#include <utility>
+ 
+ namespace VR
+ {
+@@ -43,6 +45,13 @@ namespace VR
+         return true;
+     }
+ 
++    static std::string diagnosticCaptureSessionId()
++    {
++        const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::system_clock::now().time_since_epoch());
++        return std::to_string(timestamp.count());
++    }
++
+     int parseResolution(std::string conf, int recommended, int max)
+     {
+         if (isNumber(conf))
+@@ -132,9 +141,13 @@ namespace VR
+         return *sViewer;
+     }
+ 
+-    Viewer::Viewer(std::shared_ptr<VR::Session> session, osg::ref_ptr<osgViewer::Viewer> viewer)
++    Viewer::Viewer(std::shared_ptr<VR::Session> session, osg::ref_ptr<osgViewer::Viewer> viewer,
++        std::filesystem::path diagnosticCaptureDirectory, uint64_t diagnosticCaptureFrame)
+         : mSession(session)
+         , mViewer(viewer)
++        , mDiagnosticCaptureDirectory(std::move(diagnosticCaptureDirectory))
++        , mDiagnosticCaptureSessionId(diagnosticCaptureSessionId())
++        , mDiagnosticCaptureFrame(diagnosticCaptureFrame)
+         , mSwapBuffersCallback(new SwapBuffersCallback(this))
+         , mInitialDraw(new InitialDrawCallback(this))
+         , mFinalDraw(new FinaldrawCallback(this))
+@@ -405,9 +418,49 @@ namespace VR
+                 srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+         }
+ 
++        if (mDrawFrame.diagnostic && mDrawFrame.diagnosticFrameNumber > 0
++            && mDrawFrame.diagnosticFrameNumber >= mDiagnosticCaptureFrame
++            && !mDiagnosticEyeCaptureAttempted[i])
++            captureDiagnosticEye(state, dst, i);
++
+         gl->glBindFramebuffer(GL_FRAMEBUFFER_EXT, 0);
+     }
+ 
++    void Viewer::captureDiagnosticEye(osg::State* state, osg::FrameBufferObject* framebuffer, int eye)
++    {
++        mDiagnosticEyeCaptureAttempted[eye] = true;
++        const char* eyeName = eye == VR::Side_Left ? "left" : "right";
++        try
++        {
++            std::filesystem::create_directories(mDiagnosticCaptureDirectory);
++            framebuffer->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
++            auto* gl = osg::GLExtensions::Get(state->getContextID(), false);
++            if (gl)
++                gl->glReadBuffer(GL_COLOR_ATTACHMENT0);
++
++            osg::ref_ptr<osg::Image> image = new osg::Image;
++            image->readPixels(static_cast<int>(mSubImages[eye].x), static_cast<int>(mSubImages[eye].y),
++                static_cast<int>(mSubImages[eye].width), static_cast<int>(mSubImages[eye].height), GL_RGBA,
++                GL_UNSIGNED_BYTE);
++            image->flipVertical();
++
++            const auto fileName = "openmw-frame-diagnostic-synthetic-" + mDiagnosticCaptureSessionId + "-frame-"
++                + std::to_string(mDrawFrame.frameNumber) + "-" + eyeName + ".png";
++            const auto outputPath = mDiagnosticCaptureDirectory / fileName;
++            if (!osgDB::writeImageFile(*image, outputPath.string()))
++            {
++                Log(Debug::Warning) << "Frame diagnostic could not write eye dump: " << outputPath;
++                return;
++            }
++
++            Log(Debug::Info) << "Frame diagnostic wrote actual rendered " << eyeName << " eye image: " << outputPath;
++        }
++        catch (const std::exception& error)
++        {
++            Log(Debug::Warning) << "Frame diagnostic failed to capture the " << eyeName << " eye: " << error.what();
++        }
++    }
++
+     void Viewer::blitMirrorTexture(osg::State* state, int i)
+     {
+         auto* gl = osg::GLExtensions::Get(state->getContextID(), false);
+@@ -467,6 +520,7 @@ namespace VR
+ 
+         for (auto i = 0; i < 2; i++)
+         {
++            const auto swapchainCycleStart = std::chrono::steady_clock::now();
+             mColorSwapchain[i]->beginFrame(state->getGraphicsContext());
+             if (mSession->appShouldShareDepthInfo())
+                 mDepthSwapchain[i]->beginFrame(state->getGraphicsContext());
+@@ -478,6 +532,11 @@ namespace VR
+             mColorSwapchain[i]->endFrame(state->getGraphicsContext());
+             if (mSession->appShouldShareDepthInfo())
+                 mDepthSwapchain[i]->endFrame(state->getGraphicsContext());
++            if (mDrawFrame.diagnosticPerfComparable)
++            {
++                mDiagnosticSwapchainCycleMilliseconds[i] = std::chrono::duration<double, std::milli>(
++                    std::chrono::steady_clock::now() - swapchainCycleStart).count();
++            }
+         }
+ 
+         // Undo all framebuffer bindings we have done.
+@@ -495,6 +554,8 @@ namespace VR
+             mDrawFrame = mReadyFrames.front();
+             mReadyFrames.pop();
+         }
++        if (mDrawFrame.diagnosticPerfComparable)
++            mDiagnosticRenderStart = std::chrono::steady_clock::now();
+         VR::Session::instance().frameBeginRender(mDrawFrame);
+     }
+ 
+@@ -504,10 +565,22 @@ namespace VR
+         if (view == Misc::CallbackManager::View::Left)
+             return;
+         VR::Session::instance().frameEnd(info, mDrawFrame);
++        if (mDrawFrame.diagnosticPerfComparable)
++        {
++            mDiagnosticRenderCallbackMilliseconds = std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - mDiagnosticRenderStart).count();
++        }
+         if (mDrawFrame.shouldRender)
+         {
+             blit(info);
+         }
++        if (mDrawFrame.diagnosticPerfComparable && mDrawFrame.diagnosticFrameNumber % 60 == 0)
++        {
++            Log(Debug::Info) << "Frame diagnostic offscreen timing (ms, frame " << mDrawFrame.diagnosticFrameNumber
++                             << "): osg_draw_callbacks=" << mDiagnosticRenderCallbackMilliseconds
++                             << ", left_swapchain_cycle=" << mDiagnosticSwapchainCycleMilliseconds[0]
++                             << ", right_swapchain_cycle=" << mDiagnosticSwapchainCycleMilliseconds[1];
++        }
+     }
+ 
+     void Viewer::swapBuffersCallback(osg::GraphicsContext* gc)
+diff --git a/components/vr/viewer.hpp b/components/vr/viewer.hpp
+index 9d61b1d..c1113ee 100644
+--- a/components/vr/viewer.hpp
++++ b/components/vr/viewer.hpp
+@@ -2,9 +2,12 @@
+ #define VR_VIEWER_H
+ 
+ #include <array>
++#include <chrono>
++#include <filesystem>
+ #include <map>
+ #include <memory>
+ #include <queue>
++#include <string>
+ 
+ #include <osg/Camera>
+ #include <osg/Group>
+@@ -57,7 +60,8 @@ namespace VR
+     public:
+         static Viewer& instance();
+ 
+-        Viewer(std::shared_ptr<VR::Session> session, osg::ref_ptr<osgViewer::Viewer> viewer);
++        Viewer(std::shared_ptr<VR::Session> session, osg::ref_ptr<osgViewer::Viewer> viewer,
++            std::filesystem::path diagnosticCaptureDirectory, uint64_t diagnosticCaptureFrame);
+ 
+         ~Viewer(void);
+ 
+@@ -71,6 +75,7 @@ namespace VR
+         void updateView(Stereo::View& left, Stereo::View& right);
+ 
+         bool callbacksConfigured() { return mCallbacksConfigured; }
++        const std::string& diagnosticCaptureSessionId() const { return mDiagnosticCaptureSessionId; }
+ 
+         void insertLayer(std::shared_ptr<Layer> layer);
+         void removeLayer(std::shared_ptr<Layer> layer);
+@@ -84,6 +89,7 @@ namespace VR
+     private:
+         osg::ref_ptr<osg::FrameBufferObject> getXrFramebuffer(uint32_t view, osg::State* state);
+         void blitXrFramebuffer(osg::State* state, int i);
++        void captureDiagnosticEye(osg::State* state, osg::FrameBufferObject* framebuffer, int eye);
+         void blitMirrorTexture(osg::State* state, int i);
+         void setupSwapchains();
+         void newFrame();
+@@ -93,6 +99,13 @@ namespace VR
+ 
+         std::shared_ptr<VR::Session> mSession;
+         osg::ref_ptr<osgViewer::Viewer> mViewer;
++        std::filesystem::path mDiagnosticCaptureDirectory;
++        std::string mDiagnosticCaptureSessionId;
++        uint64_t mDiagnosticCaptureFrame = 300;
++        std::chrono::steady_clock::time_point mDiagnosticRenderStart{};
++        double mDiagnosticRenderCallbackMilliseconds = 0.0;
++        std::array<double, 2> mDiagnosticSwapchainCycleMilliseconds{};
++        std::array<bool, 2> mDiagnosticEyeCaptureAttempted{};
+         osg::ref_ptr<SwapBuffersCallback> mSwapBuffersCallback;
+         std::shared_ptr<InitialDrawCallback> mInitialDraw;
+         std::shared_ptr<FinaldrawCallback> mFinalDraw;
+diff --git a/components/xr/session.cpp b/components/xr/session.cpp
+index ce37b71..e7ada05 100644
+--- a/components/xr/session.cpp
++++ b/components/xr/session.cpp
+@@ -15,7 +15,11 @@
+ #include <components/xr/space.hpp>
+ 
+ #include <cassert>
++#include <chrono>
++#include <cmath>
++#include <cstdlib>
+ #include <sstream>
++#include <string_view>
+ #include <utility>
+ 
+ namespace XR
+@@ -39,6 +43,12 @@ namespace XR
+ 
+         Debugging::setName(mXrSession, "OpenMW XR Session");
+ 
++        const char* forceRender = std::getenv("OPENMW_FRAME_FORCE_RENDER");
++        mFrameForceRender = forceRender && std::string_view(forceRender) == "1";
++        if (mFrameForceRender)
++            Log(Debug::Info) << "Frame diagnostic offscreen mode enabled; controller input is disabled and no composition "
++                                "layers will be submitted";
++
+         init();
+     }
+ 
+@@ -61,16 +71,28 @@ namespace XR
+         mAcquiredResources--;
+     }
+ 
++    void Session::beginDiagnosticCaptureWindow()
++    {
++        if (!mFrameForceRender)
++            return;
++
++        mFrameDiagnosticCaptureFrameCount.store(0, std::memory_order_relaxed);
++        mFrameDiagnosticCaptureReady.store(true, std::memory_order_release);
++    }
++
+     void Session::newFrame(uint64_t frameNo, bool& shouldSyncFrame, bool& shouldSyncInput)
+     {
++        mFrameDiagnosticSyntheticViewsActive = false;
+         handleEvents();
+         shouldSyncFrame = mAppShouldSyncFrameLoop;
+-        shouldSyncInput = mAppShouldReadInput;
++        shouldSyncInput = shouldReadInput();
+     }
+ 
+     void Session::syncFrameUpdate(
+         uint64_t frameNo, bool& shouldRender, uint64_t& predictedDisplayTime, uint64_t& predictedDisplayPeriod)
+     {
++        static_cast<void>(frameNo);
++        const auto waitStart = std::chrono::steady_clock::now();
+         XrFrameWaitInfo frameWaitInfo{};
+         frameWaitInfo.type = XR_TYPE_FRAME_WAIT_INFO;
+ 
+@@ -81,9 +103,105 @@ namespace XR
+         shouldRender = frameState.shouldRender;
+         predictedDisplayTime = frameState.predictedDisplayTime;
+         predictedDisplayPeriod = frameState.predictedDisplayPeriod;
++        mFrameDiagnosticSyntheticViewsActive = false;
++        mFrameDiagnosticRuntimeFovAvailable = false;
++        mFrameDiagnosticFrameNumber = 0;
++
++        if (mFrameForceRender)
++        {
++            if (mState == XR_SESSION_STATE_SYNCHRONIZED || mState == XR_SESSION_STATE_VISIBLE)
++            {
++                shouldRender = true;
++                mFrameDiagnosticSyntheticViewsActive = true;
++                mFrameDiagnosticRuntimeFovAvailable = locateDiagnosticFov(predictedDisplayTime);
++                if (mFrameDiagnosticCaptureReady.load(std::memory_order_acquire))
++                    mFrameDiagnosticFrameNumber
++                        = mFrameDiagnosticCaptureFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
++                if (mFrameDiagnosticFrameNumber > 0 && !mFrameDiagnosticConfigurationLogged)
++                {
++                    Log(Debug::Info) << "Frame diagnostic synthetic poses: head at (0, 0, 1.65) m in local space; "
++                                        "eye centers at x=-0.032 m and x=+0.032 m (IPD=0.064 m); identity orientation";
++                    mFrameDiagnosticConfigurationLogged = true;
++                }
++                if (mFrameDiagnosticFrameNumber > 0 && mFrameDiagnosticRuntimeFovAvailable
++                    && !mFrameDiagnosticRuntimeFovLogged)
++                {
++                    const auto& left = mFrameDiagnosticRuntimeFov[VR::Side_Left];
++                    const auto& right = mFrameDiagnosticRuntimeFov[VR::Side_Right];
++                    Log(Debug::Info) << "Frame diagnostic runtime per-eye FOV (left, right, up, down; rad): left=("
++                                     << left.angleLeft << ", " << left.angleRight << ", " << left.angleUp << ", "
++                                     << left.angleDown << "), right=(" << right.angleLeft << ", "
++                                     << right.angleRight << ", " << right.angleUp << ", " << right.angleDown << ")";
++                    mFrameDiagnosticRuntimeFovLogged = true;
++                }
++                else if (mFrameDiagnosticFrameNumber > 0 && !mFrameDiagnosticRuntimeFovAvailable
++                    && !mFrameDiagnosticFovFallbackLogged)
++                {
++                    Log(Debug::Warning)
++                        << "Frame diagnostic runtime FOV unavailable; using symmetric 90 degree horizontal and vertical "
++                           "FOV (angles +/-0.785398 rad); performance timings are suppressed while this fallback is in use";
++                    mFrameDiagnosticFovFallbackLogged = true;
++                }
++            }
++            else if (mState == XR_SESSION_STATE_FOCUSED)
++            {
++                shouldRender = false;
++                mFrameDiagnosticRefused.store(true);
++                if (!mFrameDiagnosticFocusRefusalLogged)
++                {
++                    Log(Debug::Warning)
++                        << "Frame diagnostic force-render refused while XR session is focused; rendering and live input "
++                           "remain disabled";
++                    mFrameDiagnosticFocusRefusalLogged = true;
++                }
++            }
++        }
++
++        if (mFrameDiagnosticSyntheticViewsActive)
++            mFrameDiagnosticWaitMilliseconds = std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - waitStart).count();
+         mPoseCache.clear();
+     }
+ 
++    bool Session::locateDiagnosticFov(int64_t predictedDisplayTime)
++    {
++        const auto& localSpace = mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1];
++        if (!localSpace)
++            return false;
++
++        std::array<XrView, 2> views{};
++        views[0].type = XR_TYPE_VIEW;
++        views[1].type = XR_TYPE_VIEW;
++        XrViewState viewState{};
++        viewState.type = XR_TYPE_VIEW_STATE;
++        XrViewLocateInfo locateInfo{};
++        locateInfo.type = XR_TYPE_VIEW_LOCATE_INFO;
++        locateInfo.viewConfigurationType = mViewConfigType;
++        locateInfo.displayTime = predictedDisplayTime;
++        locateInfo.space = localSpace->xrSpace();
++        uint32_t viewCount = static_cast<uint32_t>(views.size());
++
++        const XrResult result = xrLocateViews(mXrSession, &locateInfo, &viewState, viewCount, &viewCount, views.data());
++        if (XR_FAILED(result) || viewCount != static_cast<uint32_t>(views.size()))
++            return false;
++
++        for (uint32_t i = 0; i < viewCount; ++i)
++        {
++            const auto& fov = views[i].fov;
++            if (!std::isfinite(fov.angleLeft) || !std::isfinite(fov.angleRight) || !std::isfinite(fov.angleUp)
++                || !std::isfinite(fov.angleDown) || fov.angleLeft >= fov.angleRight || fov.angleDown >= fov.angleUp)
++                return false;
++            mFrameDiagnosticRuntimeFov[i] = fromXR(fov);
++        }
++
++        return true;
++    }
++
++    bool Session::shouldSubmitFrame(bool shouldRender) const
++    {
++        return !mFrameForceRender && shouldRender;
++    }
++
+     void Session::syncFrameRender(VR::Frame& frame)
+     {
+         XrFrameBeginInfo frameBeginInfo{};
+@@ -119,7 +237,7 @@ namespace XR
+         frameEndInfo.displayTime = frame.predictedDisplayTime;
+         frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+ 
+-        if (frame.shouldRender && frame.layers.size() > 0)
++        if (frame.shouldSubmit && !mFrameDiagnosticRefused.load() && frame.layers.size() > 0)
+         {
+             for (auto& layer : frame.layers)
+             {
+@@ -249,7 +367,16 @@ namespace XR
+             frameEndInfo.layerCount = 0;
+             frameEndInfo.layers = nullptr;
+         }
++        const auto endFrameStart = std::chrono::steady_clock::now();
+         CHECK_XRCMD(xrEndFrame(mXrSession, &frameEndInfo));
++        if (frame.diagnosticPerfComparable && frame.diagnosticFrameNumber % 60 == 0)
++        {
++            const auto endFrameMilliseconds = std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - endFrameStart).count();
++            Log(Debug::Info) << "Frame diagnostic offscreen timing (ms, frame " << frame.diagnosticFrameNumber
++                             << "): xr_wait_frame=" << mFrameDiagnosticWaitMilliseconds
++                             << ", xr_end_frame=" << endFrameMilliseconds;
++        }
+     }
+ 
+     void Session::handleEvents()
+@@ -623,6 +750,24 @@ namespace XR
+ 
+     std::array<Stereo::View, 2> Session::locateViews(int64_t predictedDisplayTime, VR::Space& reference)
+     {
++        if (mFrameDiagnosticSyntheticViewsActive)
++        {
++            const auto& referenceSpace = dynamic_cast<const ReferenceSpace&>(reference);
++            const float headHeight = referenceSpace.type() == VR::ReferenceSpace::View ? 0.f : 1.65f;
++            constexpr float halfEyeSeparation = 0.032f;
++            constexpr float halfFov = 0.7853981634f;
++            const Stereo::FieldOfView fallbackFov{ -halfFov, halfFov, halfFov, -halfFov };
++
++            std::array<Stereo::View, 2> views{};
++            views[VR::Side_Left].pose.position = Stereo::Position::fromMeters(-halfEyeSeparation, 0.f, headHeight);
++            views[VR::Side_Right].pose.position = Stereo::Position::fromMeters(halfEyeSeparation, 0.f, headHeight);
++            views[VR::Side_Left].fov
++                = mFrameDiagnosticRuntimeFovAvailable ? mFrameDiagnosticRuntimeFov[VR::Side_Left] : fallbackFov;
++            views[VR::Side_Right].fov
++                = mFrameDiagnosticRuntimeFovAvailable ? mFrameDiagnosticRuntimeFov[VR::Side_Right] : fallbackFov;
++            return views;
++        }
++
+         std::array<XrView, 2> xrViews{};
+         xrViews[0].type = XR_TYPE_VIEW;
+         xrViews[1].type = XR_TYPE_VIEW;
+@@ -660,6 +805,27 @@ namespace XR
+ 
+     VR::TrackingPose Session::locateSpace(XrSpace space, XrSpace referenceSpace) const
+     {
++        if (mFrameDiagnosticSyntheticViewsActive)
++        {
++            if (!VR::getLocatingSpacesAllowed())
++                throw std::logic_error("locateSpace() is only allowed during frame sync");
++            const XrSpace localSpace = mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1]->xrSpace();
++            const XrSpace viewSpace = mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::View) - 1]->xrSpace();
++            if ((space == localSpace || space == viewSpace)
++                && (referenceSpace == localSpace || referenceSpace == viewSpace))
++            {
++                VR::TrackingPose pose{};
++                pose.status = VR::TrackingStatus::Good;
++                pose.time = VR::getPredictedDisplayTime();
++                if (space == viewSpace && referenceSpace == localSpace)
++                    pose.pose.position = Stereo::Position::fromMeters(0.f, 0.f, 1.65f);
++                else if (space == localSpace && referenceSpace == viewSpace)
++                    pose.pose.position = Stereo::Position::fromMeters(0.f, 0.f, -1.65f);
++                mPoseCache[std::make_pair(space, referenceSpace)] = pose;
++                return pose;
++            }
++        }
++
+         {
+             auto it = mPoseCache.find(std::make_pair(space, referenceSpace));
+             if (it != mPoseCache.end())
+diff --git a/components/xr/session.hpp b/components/xr/session.hpp
+index 9032bcc..893ac37 100644
+--- a/components/xr/session.hpp
++++ b/components/xr/session.hpp
+@@ -1,6 +1,7 @@
+ #ifndef XR_SESSION_HPP
+ #define XR_SESSION_HPP
+ 
++#include <atomic>
+ #include <mutex>
+ 
+ #include <components/vr/constants.hpp>
+@@ -35,8 +36,19 @@ namespace XR
+         void xrResourceReleased();
+ 
+         XrSession xrSession() { return mXrSession; }
+-        bool shouldReadInput() const { return mAppShouldReadInput; }
++        bool shouldReadInput() const { return mAppShouldReadInput && !mFrameForceRender; }
+         void markInputUnfocused() { mAppShouldReadInput = false; }
++        bool isDiagnosticMode() const { return mFrameForceRender; }
++        bool isDiagnosticFrame() const override { return mFrameDiagnosticSyntheticViewsActive; }
++        bool isDiagnosticPerfComparable() const override
++        {
++            return mFrameDiagnosticSyntheticViewsActive && mFrameDiagnosticRuntimeFovAvailable
++                && mFrameDiagnosticFrameNumber > 0;
++        }
++        uint64_t diagnosticFrameNumber() const override { return mFrameDiagnosticFrameNumber; }
++        bool diagnosticRefused() const { return mFrameDiagnosticRefused.load(); }
++        bool shouldSubmitFrame(bool shouldRender) const override;
++        void beginDiagnosticCaptureWindow();
+ 
+         std::array<Stereo::View, 2> locateViews(int64_t predictedDisplayTime, VR::Space& reference) override;
+ 
+@@ -63,6 +75,7 @@ namespace XR
+         void popEvent();
+         bool handleSessionStateChanged(const XrEventDataSessionStateChanged& stateChangedEvent);
+         bool checkStopCondition();
++        bool locateDiagnosticFov(int64_t predictedDisplayTime);
+ 
+         void xrInteractionProfileChanged();
+ 
+@@ -98,6 +111,19 @@ namespace XR
+         bool mXrSessionShouldStop = false;
+         bool mAppShouldSyncFrameLoop = false;
+         bool mAppShouldReadInput = false;
++        bool mFrameForceRender = false;
++        bool mFrameDiagnosticSyntheticViewsActive = false;
++        bool mFrameDiagnosticRuntimeFovAvailable = false;
++        bool mFrameDiagnosticRuntimeFovLogged = false;
++        bool mFrameDiagnosticFovFallbackLogged = false;
++        bool mFrameDiagnosticFocusRefusalLogged = false;
++        bool mFrameDiagnosticConfigurationLogged = false;
++        std::array<Stereo::FieldOfView, 2> mFrameDiagnosticRuntimeFov{};
++        std::atomic_bool mFrameDiagnosticCaptureReady{ false };
++        std::atomic_uint64_t mFrameDiagnosticCaptureFrameCount{ 0 };
++        uint64_t mFrameDiagnosticFrameNumber = 0;
++        double mFrameDiagnosticWaitMilliseconds = 0.0;
++        std::atomic_bool mFrameDiagnosticRefused{ false };
+ 
+         bool mMSFTReprojectionModeDepth = false;
+     };
+diff --git a/components/xr/space.hpp b/components/xr/space.hpp
+index bdfdd7f..ea511d8 100644
+--- a/components/xr/space.hpp
++++ b/components/xr/space.hpp
+@@ -54,6 +54,7 @@ namespace XR
+         void recreate();
+         void recenter(bool recenterX, bool recenterY, bool recenterZ);
+         void destroy();
++        VR::ReferenceSpace type() const { return mType; }
+ 
+     private:
+         VR::ReferenceSpace mType;

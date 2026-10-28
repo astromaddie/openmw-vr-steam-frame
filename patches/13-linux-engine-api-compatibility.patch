@@ -1,0 +1,57 @@
+diff --git a/components/vr/viewer.cpp b/components/vr/viewer.cpp
+--- a/components/vr/viewer.cpp
++++ b/components/vr/viewer.cpp
+@@ -436,7 +436,7 @@
+             framebuffer->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
+             auto* gl = osg::GLExtensions::Get(state->getContextID(), false);
+             if (gl)
+-                gl->glReadBuffer(GL_COLOR_ATTACHMENT0);
++                ::glReadBuffer(GL_COLOR_ATTACHMENT0);
+ 
+             osg::ref_ptr<osg::Image> image = new osg::Image;
+             image->readPixels(static_cast<int>(mSubImages[eye].x), static_cast<int>(mSubImages[eye].y),
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -389,7 +389,7 @@
+                 {
+                     std::filesystem::create_directories(diagnosticCapturePath.parent_path());
+                     targetFbo->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
+-                    gl->glReadBuffer(GL_COLOR_ATTACHMENT0);
++                    ::glReadBuffer(GL_COLOR_ATTACHMENT0);
+                     osg::ref_ptr<osg::Image> image = new osg::Image;
+                     image->readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE);
+                     if (!osgDB::writeImageFile(*image, diagnosticCapturePath.string()))
+diff --git a/components/xr/instance.cpp b/components/xr/instance.cpp
+--- a/components/xr/instance.cpp
++++ b/components/xr/instance.cpp
+@@ -151,7 +151,7 @@
+             auto destroyDebugUtilsMessenger = reinterpret_cast<PFN_xrDestroyDebugUtilsMessengerEXT>(
+                 xrGetFunction("xrDestroyDebugUtilsMessengerEXT"));
+             if (destroyDebugUtilsMessenger)
+-                CHECK_XRCMD(destroyDebugUtilsMessenger(mXrInstance, messenger));
++                CHECK_XRCMD(destroyDebugUtilsMessenger(messenger));
+         }
+         destroyXrInstance();
+     }
+diff --git a/apps/openmw/mwlua/vrbindings.cpp b/apps/openmw/mwlua/vrbindings.cpp
+--- a/apps/openmw/mwlua/vrbindings.cpp
++++ b/apps/openmw/mwlua/vrbindings.cpp
+@@ -1,4 +1,5 @@
+ #include "vrbindings.hpp"
++#include "../mwbase/environment.hpp"
+ #include "../mwvr/vrmetamenu.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ #include "../mwbase/statemanager.hpp"
+diff --git a/apps/openmw/mwvr/vrmetamenu.cpp b/apps/openmw/mwvr/vrmetamenu.cpp
+--- a/apps/openmw/mwvr/vrmetamenu.cpp
++++ b/apps/openmw/mwvr/vrmetamenu.cpp
+@@ -26,7 +26,7 @@
+ 
+     void VrMetaMenu::openSettings()
+     {
+-        auto* wm = MWBase::Environment::get().getWindowManager();
++        auto wm = MWBase::Environment::get().getWindowManager();
+         sReturnToMeta = wm->containsMode(MWGui::GM_VrMetaMenu);
+         sSettingsOpen = true;
+         if (!sReturnToMeta)

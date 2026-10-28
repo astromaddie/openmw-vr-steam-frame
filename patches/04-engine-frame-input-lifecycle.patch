@@ -1,0 +1,779 @@
+diff --git a/apps/openmw/mwlua/vrbindings.cpp b/apps/openmw/mwlua/vrbindings.cpp
+index 2e229ba..578c043 100644
+--- a/apps/openmw/mwlua/vrbindings.cpp
++++ b/apps/openmw/mwlua/vrbindings.cpp
+@@ -140,6 +140,7 @@ namespace MWLua
+         MWVR::OpenXRInput& xrinput = MWVR::OpenXRInput::instance();
+         api["availableInteractions"] = getAvailableInteractions(context);
+         api["availableReferenceSpaces"] = getAvailableReferenceSpaces(context);
++        api["isFocused"] = []() { return XR::Session::instance().shouldReadInput(); };
+         api["isLeftHandedMode"] = []() { return VR::getLeftHandedMode(); };
+         api["isControllerActive"]
+             = [](const std::string& path) -> bool { return VR::getControllerActive(VR::stringToXrPath(path)); };
+diff --git a/apps/openmw/mwvr/openxrinput.cpp b/apps/openmw/mwvr/openxrinput.cpp
+index 4601629..7c16224 100644
+--- a/apps/openmw/mwvr/openxrinput.cpp
++++ b/apps/openmw/mwvr/openxrinput.cpp
+@@ -42,6 +42,13 @@ namespace
+ 
+ namespace MWVR
+ {
++    namespace
++    {
++        constexpr const char* FrameInteractionProfile = "/interaction_profiles/valve/frame_controller_valve";
++        constexpr const char* FrameMenuAction = "frame_menu";
++        constexpr const char* FrameMenuPath = "/user/hand/right/input/menu/click";
++    }
++
+     static OpenXRInput* sXrInput;
+ 
+     OpenXRInput& OpenXRInput::instance()
+@@ -60,6 +67,13 @@ namespace MWVR
+         createReferenceSpaces();
+     }
+ 
++    OpenXRInput::~OpenXRInput()
++    {
++        // Action spaces may also be retained by scene nodes. Invalidate their handles
++        // while the session is valid, before the action sets and session are destroyed.
++        destroySpaces();
++    }
++
+     void OpenXRInput::createActionSets()
+     {
+         mActionSets.emplace(
+@@ -147,6 +161,13 @@ namespace MWVR
+             hapticsActionsSet.createHapticsAction(pathToValidOpenXRActionName(path), path, path);
+             hapticsActionsSet.suggestBinding(path, path);
+         }
++
++        if (XR::Extensions::instance().extensionEnabled("XR_VALVE_frame_controller_interaction"))
++        {
++            luaActionsSet.createBoolAction(FrameMenuAction, "Frame Menu", FrameMenuAction);
++            luaActionsSet.suggestBinding(FrameMenuAction, FrameMenuPath);
++            mFrameMenuAction = luaActionsSet.findXrAction(FrameMenuAction);
++        }
+     }
+ 
+     void OpenXRInput::createPoseActions()
+@@ -203,7 +224,8 @@ namespace MWVR
+             std::vector<XrActionSuggestedBinding> suggestions;
+             for (auto& actionSet : mActionSets)
+                 for (auto& suggestion : actionSet.second.suggestBindings())
+-                    if (availablePaths.contains(suggestion.binding))
++                    if (availablePaths.contains(suggestion.binding)
++                        && (suggestion.action != mFrameMenuAction || profile.first.path == FrameInteractionProfile))
+                         suggestions.push_back(suggestion);
+ 
+             XrPath profilePath = 0;
+@@ -233,6 +255,35 @@ namespace MWVR
+         CHECK_XRCMD(xrAttachSessionActionSets(XR::Session::instance().xrSession(), &attachInfo));
+     }
+ 
++    bool OpenXRInput::frameMenuWasPressed()
++    {
++        if (mFrameMenuAction == XR_NULL_HANDLE)
++            return false;
++
++        const auto value = getActionSet(MWActionSet::Actions).getValue(FrameMenuAction);
++        const bool pressed = value && std::holds_alternative<bool>(*value) && std::get<bool>(*value);
++        const bool justPressed = pressed && !mFrameMenuPressed;
++        mFrameMenuPressed = pressed;
++        return justPressed;
++    }
++
++    void OpenXRInput::clearInputValues()
++    {
++        for (auto& actionSet : mActionSets)
++            actionSet.second.clearInputValues();
++        mFrameMenuPressed = false;
++    }
++
++    void OpenXRInput::destroySpaces()
++    {
++        for (auto& spaceEntry : mSpaces)
++        {
++            if (auto* xrSpace = dynamic_cast<XR::Space*>(spaceEntry.second.get()))
++                xrSpace->destroy();
++        }
++        mSpaces.clear();
++    }
++
+     void OpenXRInput::createDerivedSpace(const std::string& id, const std::string& referenceId, Stereo::Pose pose)
+     {
+         if (!mSpaces.contains(referenceId))
+@@ -279,6 +330,9 @@ namespace MWVR
+     }
+     void OpenXRInput::onFrameUpdate(VR::Frame&) 
+     {
+-        mActionSets.at(MWActionSet::Pose).update();
++        if (XR::Session::instance().shouldReadInput())
++            mActionSets.at(MWActionSet::Pose).update();
++        else
++            mActionSets.at(MWActionSet::Pose).clearInputValues();
+     }
+ }
+diff --git a/apps/openmw/mwvr/openxrinput.hpp b/apps/openmw/mwvr/openxrinput.hpp
+index 5dbb841..4418b03 100644
+--- a/apps/openmw/mwvr/openxrinput.hpp
++++ b/apps/openmw/mwvr/openxrinput.hpp
+@@ -67,6 +67,7 @@ namespace MWVR
+ 
+         //! Default constructor, creates two ActionSets: Gameplay and GUI
+         OpenXRInput();
++        ~OpenXRInput() override;
+         void createActionSets();
+         void createLuaActions();
+         void createPoseActions();
+@@ -77,6 +78,9 @@ namespace MWVR
+ 
+         //! Set bindings and attach actionSets to the session.
+         void attachActionSets();
++        void destroySpaces();
++        bool frameMenuWasPressed();
++        void clearInputValues();
+ 
+         void createDerivedSpace(const std::string& id, const std::string& referenceId, Stereo::Pose pose = {});
+         void createDerivedSpace(const std::string& id, VR::ReferenceSpace ref, Stereo::Pose pose = {});
+@@ -95,6 +99,8 @@ namespace MWVR
+         std::map<std::string, XrPath> mInteractionProfilePaths{};
+         std::map<XrPath, XrPath> mActiveInteractionProfiles;
+         std::set<std::string> mActionNamesChecklist;
++        XrAction mFrameMenuAction = XR_NULL_HANDLE;
++        bool mFrameMenuPressed = false;
+         bool mAttached = false;
+     };
+ }
+diff --git a/apps/openmw/mwvr/vrinputmanager.cpp b/apps/openmw/mwvr/vrinputmanager.cpp
+index bd394a6..415a8c1 100644
+--- a/apps/openmw/mwvr/vrinputmanager.cpp
++++ b/apps/openmw/mwvr/vrinputmanager.cpp
+@@ -304,10 +304,19 @@ namespace MWVR
+ 
+         if (!VR::getKBMouseModeActive())
+         {
+-            auto& actionSet = mXRInput->getActionSet(MWActionSet::Actions);
+-            if (actionSet.update())
+-                wm->skipVideo();
++            if (XR::Session::instance().shouldReadInput())
++            {
++                auto& actionSet = mXRInput->getActionSet(MWActionSet::Actions);
++                if (actionSet.update())
++                    wm->skipVideo();
++                if (mXRInput->frameMenuWasPressed())
++                    executeAction(MWInput::A_GameMenu);
++            }
++            else
++                mXRInput->clearInputValues();
+         }
++        else
++            mXRInput->clearInputValues();
+ 
+         if (mGameMenuLongPressTimer)
+         {
+diff --git a/components/sceneutil/rtt.cpp b/components/sceneutil/rtt.cpp
+index 8772c8d..1a53172 100644
+--- a/components/sceneutil/rtt.cpp
++++ b/components/sceneutil/rtt.cpp
+@@ -260,7 +260,7 @@ namespace SceneUtil
+             camera->getBufferAttachmentMap()[osg::Camera::PACKED_DEPTH_STENCIL_BUFFER]._internalFormat
+                 = mDepthBufferInternalFormat;
+             camera->getBufferAttachmentMap()[osg::Camera::PACKED_DEPTH_STENCIL_BUFFER]._mipMapGeneration
+-                = mGenerateMipmaps;
++                = false;
+         }
+ 
+         return mViewDependentDataMap[cv].get();
+diff --git a/components/xr/action.hpp b/components/xr/action.hpp
+index 1f86066..cf2bfe0 100644
+--- a/components/xr/action.hpp
++++ b/components/xr/action.hpp
+@@ -79,6 +79,7 @@ namespace XR
+         std::string xrActionName() const { return mAction->mLocalName; }
+ 
+         std::optional<Value> value() const { return mValue; }
++        void clearValue() { mValue.reset(); }
+ 
+         virtual bool update() = 0;
+ 
+diff --git a/components/xr/actionset.cpp b/components/xr/actionset.cpp
+index 4ec5029..46f7c82 100644
+--- a/components/xr/actionset.cpp
++++ b/components/xr/actionset.cpp
+@@ -278,16 +278,30 @@ namespace XR
+         else if (res == XR_SUCCESS)
+         {
+             for (auto& action : mAllInputActions)
+-                inputChanged = inputChanged || action.second->update();
++            {
++                const bool changed = action.second->update();
++                inputChanged = changed || inputChanged;
++            }
+         }
+         else
+         {
+             // Do nothing if xrSyncActions returned XR_SESSION_NOT_FOCUSED or XR_SESSION_LOSS_PENDING
++            if (res == XR_SESSION_NOT_FOCUSED || res == XR_SESSION_LOSS_PENDING)
++            {
++                Session::instance().markInputUnfocused();
++                clearInputValues();
++            }
+         }
+ 
+         return inputChanged;
+     }
+ 
++    void ActionSet::clearInputValues()
++    {
++        for (auto& action : mAllInputActions)
++            action.second->clearValue();
++    }
++
+     XrPath ActionSet::getXrPath(const std::string& path) const
+     {
+         XrPath xrpath = 0;
+diff --git a/components/xr/actionset.hpp b/components/xr/actionset.hpp
+index a942ce8..5dad6a1 100644
+--- a/components/xr/actionset.hpp
++++ b/components/xr/actionset.hpp
+@@ -37,6 +37,7 @@ namespace XR
+ 
+         //! Update all actions
+         bool update();
++        void clearInputValues();
+ 
+         //! Apply haptics of the given intensity to the given limb
+         void applyHaptics(const std::string& id, float intensity);
+diff --git a/components/xr/instance.cpp b/components/xr/instance.cpp
+index 409179d..b212b7f 100644
+--- a/components/xr/instance.cpp
++++ b/components/xr/instance.cpp
+@@ -23,6 +23,7 @@
+ #include <iostream>
+ #include <sstream>
+ #include <stdexcept>
++#include <utility>
+ #include <vector>
+ 
+ namespace XR
+@@ -144,13 +145,24 @@ namespace XR
+ 
+     void Instance::cleanup()
+     {
++        if (mDebugMessenger && mXrInstance)
++        {
++            const auto messenger = std::exchange(mDebugMessenger, XR_NULL_HANDLE);
++            auto destroyDebugUtilsMessenger = reinterpret_cast<PFN_xrDestroyDebugUtilsMessengerEXT>(
++                xrGetFunction("xrDestroyDebugUtilsMessengerEXT"));
++            if (destroyDebugUtilsMessenger)
++                CHECK_XRCMD(destroyDebugUtilsMessenger(mXrInstance, messenger));
++        }
+         destroyXrInstance();
+     }
+ 
+     void Instance::destroyXrInstance()
+     {
+         if (mXrInstance)
+-            CHECK_XRCMD(xrDestroyInstance(mXrInstance));
++        {
++            const auto instance = std::exchange(mXrInstance, XR_NULL_HANDLE);
++            CHECK_XRCMD(xrDestroyInstance(instance));
++        }
+     }
+ 
+     std::string XrResultString(XrResult res)
+@@ -158,7 +170,10 @@ namespace XR
+         return to_string(res);
+     }
+ 
+-    Instance::~Instance() {}
++    Instance::~Instance()
++    {
++        cleanup();
++    }
+ 
+     void Instance::setupExtensionsAndLayers() {}
+     static XrBool32 xrDebugCallback(XrDebugUtilsMessageSeverityFlagsEXT messageSeverity,
+diff --git a/components/xr/platform.cpp b/components/xr/platform.cpp
+index 3a82063..4752dac 100644
+--- a/components/xr/platform.cpp
++++ b/components/xr/platform.cpp
+@@ -351,9 +351,48 @@ namespace XR
+             GLXDrawable glxDrawable = glXGetCurrentDrawable();
+             Display* xDisplay = glXGetCurrentDisplay();
+ 
+-            // TODO: runtimes don't actually care (yet)
+-            GLXFBConfig glxFBConfig = 0;
+-            uint32_t visualid = 0;
++            int contextFBConfigId = 0;
++            const int contextFBConfigResult =
++                glXQueryContext(xDisplay, glxContext, GLX_FBCONFIG_ID, &contextFBConfigId);
++            int fbConfigId = contextFBConfigId;
++            if (contextFBConfigResult != Success || contextFBConfigId <= 0)
++            {
++                unsigned int drawableFBConfigId = 0;
++                glXQueryDrawable(xDisplay, glxDrawable, GLX_FBCONFIG_ID, &drawableFBConfigId);
++                fbConfigId = static_cast<int>(drawableFBConfigId);
++            }
++
++            if (fbConfigId <= 0)
++                throw std::runtime_error("Unable to query a valid GLX FBConfig id from context or drawable");
++
++            int fbConfigCount = 0;
++            GLXFBConfig* fbConfigs = glXGetFBConfigs(xDisplay, DefaultScreen(xDisplay), &fbConfigCount);
++            GLXFBConfig glxFBConfig = nullptr;
++            int fbConfigMatchCount = 0;
++            for (int i = 0; fbConfigs && i < fbConfigCount; ++i)
++            {
++                int candidateId = 0;
++                if (glXGetFBConfigAttrib(xDisplay, fbConfigs[i], GLX_FBCONFIG_ID, &candidateId) == Success
++                    && candidateId == fbConfigId)
++                {
++                    if (fbConfigMatchCount == 0)
++                        glxFBConfig = fbConfigs[i];
++                    ++fbConfigMatchCount;
++                }
++            }
++            if (fbConfigs)
++                XFree(fbConfigs);
++
++            Log(Debug::Verbose) << "OpenXR GLX FBConfig id " << fbConfigId << " matched " << fbConfigMatchCount
++                                << " of " << fbConfigCount << " configs";
++            if (!glxFBConfig || fbConfigMatchCount != 1)
++                throw std::runtime_error("Unable to resolve the drawable's GLX FBConfig uniquely");
++
++            XVisualInfo* visualInfo = glXGetVisualFromFBConfig(xDisplay, glxFBConfig);
++            if (!visualInfo)
++                throw std::runtime_error("Unable to resolve visual for the drawable's GLX FBConfig");
++            uint32_t visualid = static_cast<uint32_t>(visualInfo->visualid);
++            XFree(visualInfo);
+ 
+             XrGraphicsBindingOpenGLXlibKHR graphicsBindings{};
+             graphicsBindings.type = XR_TYPE_GRAPHICS_BINDING_OPENGL_XLIB_KHR;
+diff --git a/components/xr/session.cpp b/components/xr/session.cpp
+index c97e670..ce37b71 100644
+--- a/components/xr/session.cpp
++++ b/components/xr/session.cpp
+@@ -16,6 +16,7 @@
+ 
+ #include <cassert>
+ #include <sstream>
++#include <utility>
+ 
+ namespace XR
+ {
+@@ -440,6 +441,16 @@ namespace XR
+ 
+     void Session::cleanup()
+     {
++        // External code can retain shared references to these wrappers. Destroy their
++        // OpenXR handles while the session is still valid, then leave those wrappers empty.
++        for (auto& referenceSpace : mReferenceSpaces)
++        {
++            if (referenceSpace)
++            {
++                referenceSpace->destroy();
++                referenceSpace.reset();
++            }
++        }
+         destroyXrSession();
+     }
+ 
+@@ -447,7 +458,8 @@ namespace XR
+     {
+         if (mXrSession)
+         {
+-            CHECK_XRCMD(xrDestroySession(mXrSession));
++            const auto session = std::exchange(mXrSession, XR_NULL_HANDLE);
++            CHECK_XRCMD(xrDestroySession(session));
+         }
+     }
+ 
+diff --git a/components/xr/session.hpp b/components/xr/session.hpp
+index 8c28787..9032bcc 100644
+--- a/components/xr/session.hpp
++++ b/components/xr/session.hpp
+@@ -35,6 +35,8 @@ namespace XR
+         void xrResourceReleased();
+ 
+         XrSession xrSession() { return mXrSession; }
++        bool shouldReadInput() const { return mAppShouldReadInput; }
++        void markInputUnfocused() { mAppShouldReadInput = false; }
+ 
+         std::array<Stereo::View, 2> locateViews(int64_t predictedDisplayTime, VR::Space& reference) override;
+ 
+diff --git a/components/xr/space.cpp b/components/xr/space.cpp
+index da54b4d..e3f78e9 100644
+--- a/components/xr/space.cpp
++++ b/components/xr/space.cpp
+@@ -3,22 +3,32 @@
+ #include "space.hpp"
+ 
+ #include <cassert>
++#include <utility>
+ 
+ namespace XR
+ {
+     XrSpaceWrapper::~XrSpaceWrapper() 
+     {
+-        if (mSpace != XR_NULL_HANDLE)
+-            CHECK_XRCMD(xrDestroySpace(mSpace));
++        destroy();
+     }
+ 
+     void XrSpaceWrapper::operator=(XrSpace space) 
+     {
+-        if (mSpace != XR_NULL_HANDLE)
+-            CHECK_XRCMD(xrDestroySpace(mSpace));
++        if (mSpace == space)
++            return;
++        destroy();
+         mSpace = space;
+     }
+ 
++    void XrSpaceWrapper::destroy()
++    {
++        if (mSpace != XR_NULL_HANDLE)
++        {
++            const auto space = std::exchange(mSpace, XR_NULL_HANDLE);
++            CHECK_XRCMD(xrDestroySpace(space));
++        }
++    }
++
+     Space::Space(XrSpace space)
+         : mSpace(space)
+     {
+@@ -29,6 +39,11 @@ namespace XR
+     {
+     }
+ 
++    void Space::destroy()
++    {
++        mSpace.destroy();
++    }
++
+     VR::TrackingPose Space::locate(VR::Space& reference)
+     {
+         return XR::Session::instance().locateSpace(xrSpace(), dynamic_cast<XR::Space&>(reference).xrSpace());
+@@ -63,6 +78,12 @@ namespace XR
+         recenter(true, true, true);
+     }
+ 
++    void ReferenceSpace::destroy()
++    {
++        Space::destroy();
++        mRecenter = false;
++    }
++
+     void ReferenceSpace::recenter(bool recenterX, bool recenterY, bool recenterZ) 
+     {
+         auto& session = Session::instance();
+diff --git a/components/xr/space.hpp b/components/xr/space.hpp
+index 9bb349a..bdfdd7f 100644
+--- a/components/xr/space.hpp
++++ b/components/xr/space.hpp
+@@ -19,6 +19,7 @@ namespace XR
+         ~XrSpaceWrapper();
+ 
+         void operator=(XrSpace space);
++        void destroy();
+ 
+         XrSpaceWrapper(const XrSpaceWrapper&) = delete;
+         void operator=(const XrSpaceWrapper&) = delete;
+@@ -36,6 +37,7 @@ namespace XR
+ 
+         VR::TrackingPose locate(VR::Space& reference) override;
+         VR::TrackingPose locateInWorld() override;
++        void destroy();
+     protected:
+ 
+         mutable XrSpaceWrapper mSpace;
+@@ -51,6 +53,7 @@ namespace XR
+ 
+         void recreate();
+         void recenter(bool recenterX, bool recenterY, bool recenterZ);
++        void destroy();
+ 
+     private:
+         VR::ReferenceSpace mType;
+diff --git a/files/data/scripts/omw/vr/inputs/common.lua b/files/data/scripts/omw/vr/inputs/common.lua
+index 0667f96..e3c2b01 100644
+--- a/files/data/scripts/omw/vr/inputs/common.lua
++++ b/files/data/scripts/omw/vr/inputs/common.lua
+@@ -14,6 +14,9 @@ local controllers = {
+     RIGHT_HAND = '/user/hand/right',
+ }
+ 
++local frameInteractionProfile = '/interaction_profiles/valve/frame_controller_valve'
++local frameViewPath = '/user/hand/left/input/view/click'
++
+ local interactionNames = {
+     ['/user/hand/left/input/a/click'] = 'Left A Click',
+     ['/user/hand/left/input/a/touch'] = 'Left A Touch',
+@@ -275,6 +278,11 @@ local function getInteractionProfileOfController(controller)
+     return interactionProfileAliases[profile] or profile
+ end
+ 
++local function isFrameViewPath(path)
++    return path == frameViewPath
++        and getInteractionProfileOfController(controllers.LEFT_HAND) == frameInteractionProfile
++end
++
+ local function getOrInitBindingsForProfile(tab, profile)
+     local bindings = tab[profile]
+     if not bindings then
+@@ -590,8 +598,12 @@ local function registerTriggers()
+     reg('PointerActivate', ActionSetTemplates.Interaction, true)
+     reg('Recenter', ActionSetTemplates.Always, false, true)
+     reg('MetaMenu', ActionSetTemplates.NotMenu, true)
+-    --reg('MenuSelect', ActionSetTemplates.Menu)
+     reg('MenuBack', ActionSetTemplates.MenuOnly)
++    reg('MenuUp', ActionSetTemplates.MenuOnly)
++    reg('MenuDown', ActionSetTemplates.MenuOnly)
++    reg('MenuLeft', ActionSetTemplates.MenuOnly)
++    reg('MenuRight', ActionSetTemplates.MenuOnly)
++    reg('MenuSelect', ActionSetTemplates.MenuOnly)
+     reg('RadialMenu', ActionSetTemplates.NotMenu, false, true)
+ 
+ 
+@@ -805,6 +817,8 @@ local onInputChangedBoolean = nil
+ 
+ local inputHoldTime = {}
+ local longPressTime = 2.0 / 3.0
++local frameViewHoldStartedAt = nil
++local frameViewHeightCalibrated = false
+ 
+ local function tryTriggers(path, long)
+     for id, key in pairs (activeTriggerBindings[path] or {}) do
+@@ -817,26 +831,52 @@ local function tryTriggers(path, long)
+             end
+         end
+     end
+-    tryManualTriggers(path)
++    if not long or not isFrameViewPath(path) then
++        tryManualTriggers(path)
++    end
+ end
+ 
+ local function inputChangedBoolean(path, action, value)
++    local focused = vr.isFocused()
++    local holdThreshold = isFrameViewPath(path) and 1.0 or longPressTime
++
++    if path == frameViewPath then
++        if focused and action.valueBoolean and isFrameViewPath(path) then
++            frameViewHoldStartedAt = core.getRealTime()
++            frameViewHeightCalibrated = false
++        elseif not action.valueBoolean then
++            frameViewHoldStartedAt = nil
++            frameViewHeightCalibrated = false
++        end
++    end
++
+     -- In order to accomodate long presses, triggers react on release.
+     if action.valueBoolean then
+-        inputHoldTime[path] = 0
++        if focused then
++            inputHoldTime[path] = 0
++        end
++    elseif not focused then
++        inputHoldTime[path] = nil
+     else
+-        if inputHoldTime[path] ~= nil and inputHoldTime[path] < longPressTime then
++        if inputHoldTime[path] ~= nil and inputHoldTime[path] < holdThreshold then
+             tryTriggers(path, false)
+             inputHoldTime[path] = nil
+         end
+     end
+ 
+-    if onInputChangedBoolean then
++    if focused and onInputChangedBoolean then
+         onInputChangedBoolean(path, action, value)
+     end
+ end
+ 
+ local function updateInputs(dt)
++    local focused = vr.isFocused()
++    if not focused then
++        inputHoldTime = {}
++        frameViewHoldStartedAt = nil
++        frameViewHeightCalibrated = false
++    end
++
+     for path, action in pairs(inputActions) do
+         local prevBoolean = action.valueBoolean
+         value = action.func()
+@@ -855,15 +895,28 @@ local function updateInputs(dt)
+             inputChangedBoolean(path, action, action.valueBoolean)
+         end
+     end
++
++    if not focused then
++        return
++    end
++
+     for path, time in pairs(inputHoldTime) do
+         local newTime = time + dt
+-        if newTime > longPressTime then
++        local holdThreshold = isFrameViewPath(path) and 1.0 or longPressTime
++        if newTime > holdThreshold then
+             tryTriggers(path, true)
+             inputHoldTime[path] = nil
+         else
+             inputHoldTime[path] = newTime
+         end
+     end
++
++    if frameViewHoldStartedAt and isFrameViewPath(frameViewPath) and not frameViewHeightCalibrated
++        and core.getRealTime() - frameViewHoldStartedAt >= 3.0 then
++        vr._recenterXY()
++        vr._recenterZ()
++        frameViewHeightCalibrated = true
++    end
+ end
+ 
+ local function isKBMouseMode()
+diff --git a/files/data/scripts/omw/vr/inputs/defaultBindingsLeftHanded.lua b/files/data/scripts/omw/vr/inputs/defaultBindingsLeftHanded.lua
+index 0267ffb..d2fe132 100644
+--- a/files/data/scripts/omw/vr/inputs/defaultBindingsLeftHanded.lua
++++ b/files/data/scripts/omw/vr/inputs/defaultBindingsLeftHanded.lua
+@@ -252,9 +252,43 @@ return {
+                 ['MenuScrollDown_VR'] = '/user/hand/left/input/thumbstick/down', 
+             },
+         },
++        ['/interaction_profiles/valve/frame_controller_valve'] = {
++            ['/user/hand/right'] = {
++                ['PointerActivate_VR'] = '/user/hand/right/input/a/click',
++                ['ToggleWeapon_VR'] = '/user/hand/right/input/a/click',
++                ['Inventory_VR'] = '/user/hand/right/input/b/click',
++                ['RadialMenu_VR'] = '/user/hand/right/input/b/click',
++                ['ToggleSpell_VR'] = '/user/hand/right/input/x/click',
++                ['MetaMenu_VR'] = '/user/hand/right/input/y/click',
++                ['MenuSelect_VR'] = '/user/hand/right/input/a/click',
++                ['LookLeft_VR'] = '/user/hand/right/input/thumbstick/left',
++                ['LookRight_VR'] = '/user/hand/right/input/thumbstick/right',
++                ['MenuScrollUp_VR'] = '/user/hand/right/input/thumbstick/up',
++                ['MenuScrollDown_VR'] = '/user/hand/right/input/thumbstick/down',
++                ['ToggleSneak_VR'] = '/user/hand/right/input/thumbstick/down',
++                ['AutoMove_VR'] = '/user/hand/right/input/thumbstick/click',
++                ['Jump_VR'] = '/user/hand/right/input/trigger/value',
++                ['Sneak_VR'] = '/user/hand/right/input/squeeze/value',
++            },
++            ['/user/hand/left'] = {
++                ['MoveLeft_VR'] = '/user/hand/left/input/thumbstick/left',
++                ['MoveRight_VR'] = '/user/hand/left/input/thumbstick/right',
++                ['MoveForward_VR'] = '/user/hand/left/input/thumbstick/up',
++                ['MoveBackward_VR'] = '/user/hand/left/input/thumbstick/down',
++                ['PointerLeft_VR'] = '/user/hand/left/input/squeeze/value',
++                ['Use_VR'] = '/user/hand/left/input/trigger/value',
++                ['AlwaysRun_VR'] = '/user/hand/left/input/thumbstick/click',
++                ['MenuUp_VR'] = '/user/hand/left/input/dpad_up/click',
++                ['MenuDown_VR'] = '/user/hand/left/input/dpad_down/click',
++                ['MenuLeft_VR'] = '/user/hand/left/input/dpad_left/click',
++                ['MenuRight_VR'] = '/user/hand/left/input/dpad_right/click',
++                ['MenuBack_VR'] = '/user/hand/left/input/view/click',
++                ['Recenter_VR'] = '/user/hand/left/input/view/click',
++            },
++        },
+     },
+     -- In case of profiles that have no defaults, we can insert fallbacks here using typically available paths
+     FallBack = {
+         -- TODO
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/files/data/scripts/omw/vr/inputs/defaultBindingsRightHanded.lua b/files/data/scripts/omw/vr/inputs/defaultBindingsRightHanded.lua
+index 2e3aaac..5e850b8 100644
+--- a/files/data/scripts/omw/vr/inputs/defaultBindingsRightHanded.lua
++++ b/files/data/scripts/omw/vr/inputs/defaultBindingsRightHanded.lua
+@@ -251,8 +251,42 @@ return {
+                 ['MenuLeft_VR'] = '/user/hand/left/input/thumbstick/right',
+             },
+         },
++        ['/interaction_profiles/valve/frame_controller_valve'] = {
++            ['/user/hand/right'] = {
++                ['PointerActivate_VR'] = '/user/hand/right/input/a/click',
++                ['ToggleWeapon_VR'] = '/user/hand/right/input/a/click',
++                ['Inventory_VR'] = '/user/hand/right/input/b/click',
++                ['RadialMenu_VR'] = '/user/hand/right/input/b/click',
++                ['ToggleSpell_VR'] = '/user/hand/right/input/x/click',
++                ['MetaMenu_VR'] = '/user/hand/right/input/y/click',
++                ['MenuSelect_VR'] = '/user/hand/right/input/a/click',
++                ['LookLeft_VR'] = '/user/hand/right/input/thumbstick/left',
++                ['LookRight_VR'] = '/user/hand/right/input/thumbstick/right',
++                ['MenuScrollUp_VR'] = '/user/hand/right/input/thumbstick/up',
++                ['MenuScrollDown_VR'] = '/user/hand/right/input/thumbstick/down',
++                ['ToggleSneak_VR'] = '/user/hand/right/input/thumbstick/down',
++                ['AutoMove_VR'] = '/user/hand/right/input/thumbstick/click',
++                ['Use_VR'] = '/user/hand/right/input/trigger/value',
++                ['PointerRight_VR'] = '/user/hand/right/input/squeeze/value',
++            },
++            ['/user/hand/left'] = {
++                ['MoveLeft_VR'] = '/user/hand/left/input/thumbstick/left',
++                ['MoveRight_VR'] = '/user/hand/left/input/thumbstick/right',
++                ['MoveForward_VR'] = '/user/hand/left/input/thumbstick/up',
++                ['MoveBackward_VR'] = '/user/hand/left/input/thumbstick/down',
++                ['Jump_VR'] = '/user/hand/left/input/trigger/value',
++                ['Sneak_VR'] = '/user/hand/left/input/squeeze/value',
++                ['AlwaysRun_VR'] = '/user/hand/left/input/thumbstick/click',
++                ['MenuUp_VR'] = '/user/hand/left/input/dpad_up/click',
++                ['MenuDown_VR'] = '/user/hand/left/input/dpad_down/click',
++                ['MenuLeft_VR'] = '/user/hand/left/input/dpad_left/click',
++                ['MenuRight_VR'] = '/user/hand/left/input/dpad_right/click',
++                ['MenuBack_VR'] = '/user/hand/left/input/view/click',
++                ['Recenter_VR'] = '/user/hand/left/input/view/click',
++            },
++        },
+     },
+     -- In case of profiles that have no defaults, we can insert fallbacks here using typically available paths
+     FallBack = {
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/files/openxrinteractionprofiles.xml b/files/openxrinteractionprofiles.xml
+index e1aa178..cc967a7 100644
+--- a/files/openxrinteractionprofiles.xml
++++ b/files/openxrinteractionprofiles.xml
+@@ -485,4 +485,41 @@
+ 			</Controller>
+ 		</InteractionsMap>
+ 	</Entry>
++	<Entry>
++		<InteractionProfiles>
++			<InteractionProfile path="/interaction_profiles/valve/frame_controller_valve" requiredExtension="XR_VALVE_frame_controller_interaction" />
++		</InteractionProfiles>
++		<InteractionsMap>
++			<Controller path="/user/hand/right">
++				<Interaction type="POSE" path="/input/grip/pose" />
++				<Interaction type="POSE" path="/input/aim/pose" />
++				<Interaction type="BOOLEAN" path="/input/a/click" />
++				<Interaction type="BOOLEAN" path="/input/b/click" />
++				<Interaction type="BOOLEAN" path="/input/x/click" />
++				<Interaction type="BOOLEAN" path="/input/y/click" />
++				<Interaction type="BOOLEAN" path="/input/menu/click" />
++				<Interaction type="FLOAT" path="/input/trigger/value" />
++				<Interaction type="FLOAT" path="/input/squeeze/value" />
++				<Interaction type="AXIS" path="/input/thumbstick/x" />
++				<Interaction type="AXIS" path="/input/thumbstick/y" />
++				<Interaction type="BOOLEAN" path="/input/thumbstick/click" />
++				<Interaction type="FLOAT" path="/output/haptic" />
++			</Controller>
++			<Controller path="/user/hand/left">
++				<Interaction type="POSE" path="/input/grip/pose" />
++				<Interaction type="POSE" path="/input/aim/pose" />
++				<Interaction type="BOOLEAN" path="/input/dpad_up/click" />
++				<Interaction type="BOOLEAN" path="/input/dpad_down/click" />
++				<Interaction type="BOOLEAN" path="/input/dpad_left/click" />
++				<Interaction type="BOOLEAN" path="/input/dpad_right/click" />
++				<Interaction type="BOOLEAN" path="/input/view/click" />
++				<Interaction type="FLOAT" path="/input/trigger/value" />
++				<Interaction type="FLOAT" path="/input/squeeze/value" />
++				<Interaction type="AXIS" path="/input/thumbstick/x" />
++				<Interaction type="AXIS" path="/input/thumbstick/y" />
++				<Interaction type="BOOLEAN" path="/input/thumbstick/click" />
++				<Interaction type="FLOAT" path="/output/haptic" />
++			</Controller>
++		</InteractionsMap>
++	</Entry>
+ </InteractionProfileDatabase>

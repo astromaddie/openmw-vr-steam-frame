@@ -1,0 +1,22 @@
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -392,7 +392,6 @@
+                     gl->glReadBuffer(GL_COLOR_ATTACHMENT0);
+                     osg::ref_ptr<osg::Image> image = new osg::Image;
+                     image->readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE);
+-                    image->flipVertical();
+                     if (!osgDB::writeImageFile(*image, diagnosticCapturePath.string()))
+                         Log(Debug::Warning) << "Frame diagnostic could not write rendered UI layer texture: "
+                                             << diagnosticCapturePath;
+diff --git a/components/vr/viewer.cpp b/components/vr/viewer.cpp
+--- a/components/vr/viewer.cpp
++++ b/components/vr/viewer.cpp
+@@ -442,7 +442,6 @@
+             image->readPixels(static_cast<int>(mSubImages[eye].x), static_cast<int>(mSubImages[eye].y),
+                 static_cast<int>(mSubImages[eye].width), static_cast<int>(mSubImages[eye].height), GL_RGBA,
+                 GL_UNSIGNED_BYTE);
+-            image->flipVertical();
+ 
+             const auto fileName = "openmw-frame-diagnostic-synthetic-" + mDiagnosticCaptureSessionId + "-frame-"
+                 + std::to_string(mDrawFrame.frameNumber) + "-" + eyeName + ".png";

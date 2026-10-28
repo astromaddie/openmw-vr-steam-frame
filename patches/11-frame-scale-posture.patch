@@ -1,0 +1,636 @@
+diff --git a/apps/openmw/mwlua/vrbindings.cpp b/apps/openmw/mwlua/vrbindings.cpp
+index c029a99..ff9462e 100644
+--- a/apps/openmw/mwlua/vrbindings.cpp
++++ b/apps/openmw/mwlua/vrbindings.cpp
+@@ -170,6 +170,14 @@ namespace MWLua
+             MWBase::Environment::get().getWindowManager()->toggleSettingsWindow();
+         };
+         api["_frameSettingGet"] = [](const std::string& key) -> double {
++            if (key == "world scale") return VR::validWorldScale(Settings::vr().mWorldScale.get());
++            if (key == "applied world scale") return VR::Session::instance().worldScale();
++            if (key == "height offset") return VR::validHeightOffset(Settings::vr().mHeightOffset.get());
++            if (key == "applied height offset") return VR::Session::instance().heightOffset();
++            if (key == "applied seated") return VR::Session::instance().seated() ? 1.0 : 0.0;
++            if (key == "seated") return Settings::vr().mSeated ? 1.0 : 0.0;
++            if (key == "posture center") return VR::Session::instance().postureCenter();
++            if (key == "standing calibrated") return VR::Session::instance().hasStandingCalibration() ? 1.0 : 0.0;
+             if (key == "haptics enabled") return Settings::vr().mHapticsEnabled ? 1.0 : 0.0;
+             if (key == "left handed mode") return Settings::vr().mLeftHandedMode ? 1.0 : 0.0;
+             if (key == "hand directed movement") return Settings::vr().mHandDirectedMovement ? 1.0 : 0.0;
+@@ -178,7 +186,10 @@ namespace MWLua
+         };
+         api["_frameSettingSet"] = [](const std::string& key, double value) {
+             if (!std::isfinite(value)) throw std::invalid_argument("Non-finite Frame VR setting");
+-            if (key == "haptics enabled") Settings::vr().mHapticsEnabled.set(value != 0);
++            if (key == "world scale") Settings::vr().mWorldScale.set(VR::validWorldScale(value));
++            else if (key == "height offset") Settings::vr().mHeightOffset.set(VR::validHeightOffset(value));
++            else if (key == "seated") Settings::vr().mSeated.set(value != 0);
++            else if (key == "haptics enabled") Settings::vr().mHapticsEnabled.set(value != 0);
+             else if (key == "left handed mode")
+             {
+                 Settings::vr().mLeftHandedMode.set(value != 0);
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+index ab97928..a71940e 100644
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -420,6 +420,7 @@ namespace MWVR
+ 
+         if (mSpace)
+         {
++            pose.position = VR::physicalToWorld(pose.position, VR::Session::instance().worldScale());
+             auto tp = mSpace->locateInWorld();
+             if (!tp.status)
+             {
+@@ -635,6 +636,19 @@ namespace MWVR
+                 mTransform->setScale(osg::Vec3(w / res, 1.f, h / res));
+         }
+ 
++        if (!mVrLayer)
++        {
++            // Recompute every frame to avoid accumulating the multiplier.
++            const float scale = VR::Session::instance().worldScale();
++            if (!mConfig->autoSize && mLayerName != "Notification")
++            {
++                const auto extent = mConfig->extent * Constants::UnitsPerMeter;
++                mTransform->setScale(osg::Vec3(extent.x(), 1.f, extent.y()));
++            }
++            auto extent = mTransform->getScale();
++            mTransform->setScale(VR::physicalToWorld(extent, scale));
++        }
++
+         if (mVrLayer)
+         {
+             VR::SubImage subImage;
+diff --git a/components/settings/categories/vr.hpp b/components/settings/categories/vr.hpp
+index 8277991..b0b9c5d 100644
+--- a/components/settings/categories/vr.hpp
++++ b/components/settings/categories/vr.hpp
+@@ -18,6 +18,9 @@ namespace Settings
+     {
+         using WithIndex::WithIndex;
+ 
++        SettingValue<float> mWorldScale{ mIndex, "VR", "world scale", makeClampSanitizerFloat(0.25f, 4.f) };
++        SettingValue<float> mHeightOffset{ mIndex, "VR", "height offset", makeClampSanitizerFloat(-1.f, 1.f) };
++        SettingValue<bool> mSeated{ mIndex, "VR", "seated" };
+         SettingValue<float> mPlayerHeight{ mIndex, "VR", "player height", makeMaxStrictSanitizerFloat(0.1f) };
+         SettingValue<bool> mMirrorTexture{ mIndex, "VR", "mirror texture" };
+         SettingValue<std::string> mMirrorTextureEye{ mIndex, "VR", "mirror texture eye",
+diff --git a/components/vr/frameworld.hpp b/components/vr/frameworld.hpp
+new file mode 100644
+index 0000000..c663092
+--- /dev/null
++++ b/components/vr/frameworld.hpp
+@@ -0,0 +1,70 @@
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <optional>
++
++namespace VR
++{
++    // Only the physical-to-game boundary uses this adapter. OpenXR poses,
++    // compositor submissions and physical combat velocity remain in metres.
++    inline float validWorldScale(float value)
++    {
++        return std::isfinite(value) ? std::clamp(value, 0.25f, 4.f) : 1.f;
++    }
++    inline float validHeightOffset(float value)
++    {
++        return std::isfinite(value) ? std::clamp(value, -1.f, 1.f) : 0.f;
++    }
++    inline float postureTranslation(float center, float offset, float scale)
++    {
++        return (-center + validHeightOffset(offset)) * validWorldScale(scale);
++    }
++    template <class Position>
++    Position physicalToWorld(Position position, float scale)
++    {
++        return position * validWorldScale(scale);
++    }
++
++    // Coordinates are relative to this session's LOCAL space, never persisted.
++    // A seated capture must not overwrite the retained standing center.
++    class PostureCalibration
++    {
++    public:
++        bool seated() const { return mSeated; }
++        bool hasStanding() const { return mStanding.has_value(); }
++        bool pending() const { return mCapture; }
++        float center() const { return mCenter; }
++        void setSeated(bool seated)
++        {
++            if (mSeated == seated) return;
++            mSeated = seated;
++            mCapture = seated;
++            if (!seated && mStanding) mCenter = *mStanding;
++            // Without a standing baseline, keep the current center until the
++            // user explicitly calibrates while standing. Never guess a height.
++        }
++        void requestCalibration() { mCapture = true; mAllowStanding = true; }
++        bool sample(float z, bool tracked)
++        {
++            if (!mCapture || !tracked || !std::isfinite(z)) return false;
++            mCenter = z;
++            if (!mSeated && mAllowStanding) mStanding = z;
++            mCapture = false;
++            return true;
++        }
++        void invalidate()
++        {
++            mStanding.reset();
++            mCenter = 0.f;
++            mCapture = true;
++            mAllowStanding = false; // safe current-pose fallback; explicit standing calibration required
++        }
++    private:
++        bool mSeated = false;
++        bool mCapture = true;
++        bool mAllowStanding = true;
++        float mCenter = 0.f;
++        std::optional<float> mStanding;
++    };
++}
+diff --git a/components/vr/session.cpp b/components/vr/session.cpp
+index c42b9e6..88bdae4 100644
+--- a/components/vr/session.cpp
++++ b/components/vr/session.cpp
+@@ -72,8 +72,10 @@ namespace VR
+         for (auto& listener : mListeners)
+             listener->onFrameUpdate(frame);
+         VR::setLocatingSpacesAllowed(true);
++        readSettings(); // Apply scale and height together at the XR frame boundary.
+         if (mRecenter)
+             recenter();
++        updateWorldCalibration();
+     }
+ 
+     void Session::updateSpaces()
+@@ -114,8 +116,20 @@ namespace VR
+         std::erase_if(mListeners, [&](Listener* lhs) { return lhs == listener; });
+     }
+ 
++    float Session::worldScale() const
++    {
++        return mWorldScale;
++    }
++
++    float Session::heightOffset() const
++    {
++        return mHeightOffset;
++    }
++
+     void Session::readSettings()
+     {
++        mWorldScale = validWorldScale(Settings::vr().mWorldScale.get());
++        mHeightOffset = validHeightOffset(Settings::vr().mHeightOffset.get());
+         mHandsOffset.x() = (Settings::vr().mHandsOffsetX - 0.5f) * Constants::UnitsPerMeter;
+         mHandsOffset.y() = (Settings::vr().mHandsOffsetY - 0.5f) * Constants::UnitsPerMeter;
+         mHandsOffset.z() = (Settings::vr().mHandsOffsetZ - 0.5f) * Constants::UnitsPerMeter;
+diff --git a/components/vr/session.hpp b/components/vr/session.hpp
+index e491e16..7724350 100644
+--- a/components/vr/session.hpp
++++ b/components/vr/session.hpp
+@@ -1,6 +1,8 @@
+ #ifndef VR_SESSION_HPP
+ #define VR_SESSION_HPP
+ 
++#include "frameworld.hpp"
++
+ #include <array>
+ #include <chrono>
+ #include <condition_variable>
+@@ -59,6 +61,12 @@ namespace VR
+         Session();
+         virtual ~Session();
+ 
++        float worldScale() const;
++        float heightOffset() const;
++        bool seated() const { return mPosture.seated(); }
++        float postureCenter() const { return mPosture.center(); }
++        bool hasStandingCalibration() const { return mPosture.hasStanding(); }
++
+         float playerScale() const { return mPlayerScale; }
+         void computePlayerScale();
+ 
+@@ -100,7 +108,7 @@ namespace VR
+         void setInteractionProfileActive(XrPath topLevelPath, XrPath profile, bool active);
+         bool getInteractionProfileActive(XrPath topLevelPath) const;
+ 
+-        osg::Vec3 getHandsOffset() const { return mHandsOffset; }
++        osg::Vec3 getHandsOffset() const { return mHandsOffset * worldScale(); }
+ 
+         Stereo::Unit getSneakOffset() const { return mSneakOffset; }
+ 
+@@ -121,6 +129,7 @@ namespace VR
+ 
+     protected:
+         virtual void recenter();
++        virtual void updateWorldCalibration() {}
+         void readSettings();
+ 
+         //! Called once when initializing a new frame. The implementation *must* set shouldSyncFrame and
+@@ -144,6 +153,9 @@ namespace VR
+         virtual void syncFrameEnd(VR::Frame& frame) = 0;
+ 
+     protected:
++        PostureCalibration mPosture;
++        float mWorldScale = 1.f;
++        float mHeightOffset = 0.f;
+         bool mAppShouldShareDepthBuffer = false;
+         bool mRecenter = true;
+ 
+diff --git a/components/vr/space.cpp b/components/vr/space.cpp
+index 6192e9f..bd4261b 100644
+--- a/components/vr/space.cpp
++++ b/components/vr/space.cpp
+@@ -90,7 +90,11 @@ namespace VR
+     {
+         auto tp = mReference->locateInWorld();
+         if (!!tp.status)
+-            tp.pose += mPose;
++        {
++            auto offset = mPose;
++            offset.position = physicalToWorld(offset.position, Session::instance().worldScale());
++            tp.pose += offset;
++        }
+         return tp;
+     }
+ }
+diff --git a/components/vr/viewer.cpp b/components/vr/viewer.cpp
+index 95e80a7..cec3897 100644
+--- a/components/vr/viewer.cpp
++++ b/components/vr/viewer.cpp
+@@ -613,6 +613,9 @@ namespace VR
+         {
+             left = views[VR::Side_Left];
+             right = views[VR::Side_Right];
++            // Render in game units; keep localViews untouched for xrEndFrame.
++            left.pose.position = physicalToWorld(left.pose.position, mSession->worldScale());
++            right.pose.position = physicalToWorld(right.pose.position, mSession->worldScale());
+ 
+             // Print view once to log, useful for debugging the views of headsets i do not posess.
+             static bool havePrintedView = false;
+diff --git a/components/xr/session.cpp b/components/xr/session.cpp
+index e7ada05..81dd5ac 100644
+--- a/components/xr/session.cpp
++++ b/components/xr/session.cpp
+@@ -6,6 +6,7 @@
+ #include "space.hpp"
+ 
+ #include <components/misc/constants.hpp>
++#include <components/settings/values.hpp>
+ #include <components/sceneutil/depth.hpp>
+ #include <components/vr/frame.hpp>
+ #include <components/vr/layer.hpp>
+@@ -426,8 +427,14 @@ namespace XR
+                 xrInteractionProfileChanged();
+ 
+                 break;
+-            case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
+             case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
++            {
++                const auto* event = reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(header);
++                if (event->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL)
++                    mReferenceChangeTime = event->changeTime;
++                break;
++            }
++            case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
+             default:
+             {
+                 Log(Debug::Verbose) << "OpenXR: Event ignored";
+@@ -493,7 +500,6 @@ namespace XR
+                 mAppShouldReadInput = true;
+                 mXrSessionShouldStop = false;
+                 VR::recenterXY();
+-                VR::recenterZ();
+                 break;
+             }
+             default:
+@@ -507,15 +513,42 @@ namespace XR
+     {
+         bool recenterX = false;
+         bool recenterY = false;
+-        bool recenterZ = false;
+         if (VR::getShouldRecenterXY())
+             recenterX = recenterY = true;
++        mPosture.setSeated(Settings::vr().mSeated.get());
+         if (VR::getShouldRecenterZ())
+-            recenterZ = true;
+-        mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1]->recenter(recenterX, recenterY, recenterZ);
++            mPosture.requestCalibration();
++        // Vertical calibration is a shared world offset, never a scale change.
++        mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1]->recenter(recenterX, recenterY, false);
++        mPoseCache.clear();
++        updateWorldCalibration();
+         VR::Session::recenter();
+     }
+ 
++    void Session::updateWorldCalibration()
++    {
++        auto local = mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1];
++        if (mReferenceChangeTime && VR::getPredictedDisplayTime() >= mReferenceChangeTime)
++        {
++            // Do not reuse absolute LOCAL calibration across a system recenter.
++            local->resetCenter();
++            mPoseCache.clear();
++            mPosture.invalidate();
++            mReferenceChangeTime = 0;
++            VR::recenterXY();
++        }
++        const bool wasSeated = mPosture.seated();
++        mPosture.setSeated(Settings::vr().mSeated.get());
++        if (wasSeated != mPosture.seated()) VR::recenterXY();
++        if (mPosture.pending())
++        {
++            const auto view = mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::View) - 1];
++            auto head = locateSpace(view->xrSpace(), local->xrSpace());
++            if (mPosture.sample(head.pose.position.mZ.asMeters(), head.status == VR::TrackingStatus::Good && !isDiagnosticMode()))
++                VR::recenterXY(); // refresh menu anchors after a deferred valid capture
++        }
++    }
++
+     bool Session::checkStopCondition()
+     {
+         return mAcquiredResources == 0;
+@@ -795,6 +828,8 @@ namespace XR
+     VR::TrackingPose Session::locateSpaceInWorld(XrSpace space) const
+     {
+         auto tp = locateSpace(space, mReferenceSpaces[static_cast<int>(VR::ReferenceSpace::Local) - 1]->xrSpace());
++        tp.pose.position = VR::physicalToWorld(tp.pose.position, worldScale());
++        tp.pose.position.mZ += Stereo::Unit::fromMeters(VR::postureTranslation(mPosture.center(), heightOffset(), worldScale()));
+         tp.pose = mReferenceWorldPose + tp.pose;
+         return tp;
+     }
+@@ -849,16 +884,16 @@ namespace XR
+         }
+ 
+         // Check that everything is being tracked
+-        if (!(location.locationFlags
+-                & (XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT)))
++        constexpr XrSpaceLocationFlags tracked = XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
++        constexpr XrSpaceLocationFlags valid = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
++        if ((location.locationFlags & tracked) != tracked)
+         {
+             // It's not, data is stale
+             pose.status = VR::TrackingStatus::Stale;
+         }
+ 
+         // Check that data is valid
+-        if (!(location.locationFlags
+-                & (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT)))
++        if ((location.locationFlags & valid) != valid)
+         {
+             // It's not, we've lost tracking
+             pose.status = VR::TrackingStatus::Lost;
+diff --git a/components/xr/session.hpp b/components/xr/session.hpp
+index 893ac37..4b9bacd 100644
+--- a/components/xr/session.hpp
++++ b/components/xr/session.hpp
+@@ -55,6 +55,7 @@ namespace XR
+         VR::TrackingPose locateSpace(XrSpace space, XrSpace referenceSpace) const;
+         VR::TrackingPose locateSpaceInWorld(XrSpace space) const;
+         void setReferenceWorldPose(Stereo::Pose pose) override;
++        void clearPoseCache() { mPoseCache.clear(); }
+ 
+         std::array<VR::SwapchainConfig, 2> getRecommendedSwapchainConfig() const override;
+         std::shared_ptr<VR::Space> getReferenceSpace(VR::ReferenceSpace space) override;
+@@ -90,6 +91,7 @@ namespace XR
+         void destroyXrSession();
+ 
+         void recenter() override;
++        void updateWorldCalibration() override;
+ 
+         std::shared_ptr<VR::Swapchain> createSwapchain(uint32_t width, uint32_t height, uint32_t samples,
+             uint32_t arraySize, VR::Swapchain::Attachment attachment, const std::string& name) override;
+@@ -102,6 +104,7 @@ namespace XR
+         XrViewConfigurationType mViewConfigType;
+         XrSessionState mState = XR_SESSION_STATE_UNKNOWN;
+         Stereo::Pose mReferenceWorldPose = {};
++        XrTime mReferenceChangeTime = 0;
+         std::array<std::shared_ptr<ReferenceSpace>, 3> mReferenceSpaces;
+         mutable std::map<std::pair<XrSpace, XrSpace>, VR::TrackingPose> mPoseCache;
+ 
+diff --git a/components/xr/space.cpp b/components/xr/space.cpp
+index e3f78e9..929e116 100644
+--- a/components/xr/space.cpp
++++ b/components/xr/space.cpp
+@@ -78,21 +78,29 @@ namespace XR
+         recenter(true, true, true);
+     }
+ 
++    void ReferenceSpace::resetCenter()
++    {
++        mCenter = {};
++        mSpace.destroy();
++    }
++
+     void ReferenceSpace::destroy()
+     {
+         Space::destroy();
++        mCenter = {};
+         mRecenter = false;
+     }
+ 
+     void ReferenceSpace::recenter(bool recenterX, bool recenterY, bool recenterZ) 
+     {
+         auto& session = Session::instance();
+-        mSpace = session.createReferenceSpace(mType, {});
++        XrSpaceWrapper raw(session.createReferenceSpace(mType, {}));
++        session.clearPoseCache();
+         if (mRecenterTo && mRecenterTo != mType)
+         {
+-            auto other = session.getReferenceSpace(mRecenterTo.value());
+-            auto tp = other->locate(*this);
+-            if (!!tp.status)
++            auto other = std::dynamic_pointer_cast<XR::Space>(session.getReferenceSpace(mRecenterTo.value()));
++            auto tp = session.locateSpace(other->xrSpace(), raw.mSpace);
++            if (tp.status == VR::TrackingStatus::Good)
+             {
+                 if (recenterX)
+                     mCenter.position.mX = tp.pose.position.mX;
+@@ -100,9 +108,10 @@ namespace XR
+                     mCenter.position.mY = tp.pose.position.mY;
+                 if (recenterZ)
+                     mCenter.position.mZ = tp.pose.position.mZ;
+-                mSpace = session.createReferenceSpace(mType, mCenter);
+             }
+         }
++        mSpace = session.createReferenceSpace(mType, mCenter);
++        session.clearPoseCache();
+         mRecenter = false;
+     }
+ 
+diff --git a/components/xr/space.hpp b/components/xr/space.hpp
+index ea511d8..c4e9ddb 100644
+--- a/components/xr/space.hpp
++++ b/components/xr/space.hpp
+@@ -52,6 +52,7 @@ namespace XR
+         XrSpace xrSpace() override;
+ 
+         void recreate();
++        void resetCenter();
+         void recenter(bool recenterX, bool recenterY, bool recenterZ);
+         void destroy();
+         VR::ReferenceSpace type() const { return mType; }
+diff --git a/files/data/scripts/omw/vr/inputs/player.lua b/files/data/scripts/omw/vr/inputs/player.lua
+index 02cdb26..96b47c2 100644
+--- a/files/data/scripts/omw/vr/inputs/player.lua
++++ b/files/data/scripts/omw/vr/inputs/player.lua
+@@ -220,7 +220,7 @@ input.bindAction('Sneak', async:callback(function(dt, v)
+ 	if physicalSneak and pose and referencePose then
+ 		local wasPhysicalSneak = isPhysicalSneak
+ 		local z = pose.position.z
+-		isPhysicalSneak = z < (referencePose.position.z - physicalSneakOffset)
++		isPhysicalSneak = z < (vr._frameSettingGet('posture center') * I.vrspaces.unitsPerMeter - physicalSneakOffset)
+ 		if isPhysicalSneak ~= wasPhysicalSneak and physicalSneakMessage then
+ 			if isPhysicalSneak then
+ 				ui.showMessage(l10nContext('entered_physical_sneak'))
+diff --git a/files/data/scripts/omw/vr/ui/framesettings.lua b/files/data/scripts/omw/vr/ui/framesettings.lua
+index 47c1d24..9cae52b 100644
+--- a/files/data/scripts/omw/vr/ui/framesettings.lua
++++ b/files/data/scripts/omw/vr/ui/framesettings.lua
+@@ -17,6 +17,7 @@ local activeTab, selected = 1, 1
+ local panel, buttons, dirty = nil, {}, true
+ local pointerFocus = nil
+ local rebuild
++local lastCalibrationStatus
+ local function profile() return prefs:get('defaults_profile') or 'standard' end
+ local function native(key) return vr._frameSettingGet(key) end
+ local function setNative(key, v) vr._frameSettingSet(key, v); dirty = true end
+@@ -29,7 +30,7 @@ local function turnDefaults()
+ end
+ local function defaults()
+     -- Tab-scoped defaults preserve other categories and unknown settings.
+-    if activeTab == 1 then turnDefaults()
++    if activeTab == 1 then turnDefaults(); vr._frameSettingSet('world scale', 1)
+     elseif activeTab == 2 then
+         for key, v in pairs({['haptics enabled']=1, ['left handed mode']=0, ['hand directed movement']=0}) do
+             vr._frameSettingSet(key, v)
+@@ -117,7 +118,11 @@ rebuild=function()
+         row(content,y+120,'Smooth Speed',string.format('%.0f degrees / s',math.deg(speed)),
+             function() set(controls,'SmoothTurnSensitivity',math.max(math.rad(30),speed-math.rad(15))) end,
+             function() set(controls,'SmoothTurnSensitivity',math.min(math.rad(240),speed+math.rad(15))) end)
+-        content[#content+1]=label('Snap is the distributed default. Personal uses smooth 120.',24,y+200,820,20)
++        local size=100/native('world scale')
++        row(content,y+180,'World Size',string.format('%.0f %%',size),
++            function() setNative('world scale',100/math.max(25,size-25)) end,
++            function() setNative('world scale',100/math.min(400,size+25)) end)
++        content[#content+1]=label('Larger percentages make the world appear larger.',24,y+245,820,20)
+     elseif activeTab==2 then
+         nativeToggle(content,y,'Dominant Hand','left handed mode','Right','Left')
+         nativeToggle(content,y+60,'Movement Direction','hand directed movement','Head','Hand')
+@@ -144,14 +149,21 @@ rebuild=function()
+             function() set(controls,'PhysicalSneak',not controls:get('PhysicalSneak')) end)
+         addButton(content,'Open Audio Settings',24,y+130,function() vr._frameOpenOptions() end)
+     elseif activeTab==6 then
+-        addButton(content,'Recenter',24,y,function() vr._recenterXY() end)
+-        addButton(content,'Calibrate Height',260,y,function() vr._recenterXY(); vr._recenterZ() end)
+-        content[#content+1]=label('Calibrate in your seated or standing playing position.',24,y+90,820,22)
+-        content[#content+1]=label('Recenter preserves height; calibration resets the vertical origin.',24,y+140,820,22)
++        nativeToggle(content,y,'Seated Mode','seated')
++        local offset=native('height offset')
++        row(content,y+60,'Height Offset',string.format('%+.2f m',offset),
++            function() setNative('height offset',math.max(-1,offset-0.05)) end,
++            function() setNative('height offset',math.min(1,offset+0.05)) end)
++        addButton(content,'Recenter',24,y+120,function() vr._recenterXY() end)
++        addButton(content,native('seated')~=0 and 'Calibrate Seated' or 'Calibrate Standing',260,y+120,
++            function() vr._recenterXY(); vr._recenterZ() end)
++        content[#content+1]=label(native('standing calibrated')~=0
++            and 'Standing calibration retained. Recenter preserves height.'
++            or 'Stand, switch Seated Mode off, then Calibrate Standing.',24,y+190,820,22)
++        content[#content+1]=label('Calibrate in the selected posture. World Size is unchanged.',24,y+240,820,20)
+     end
+-    addButton(content,profile()=='frame_personal' and 'Profile: Personal' or 'Profile: Standard',24,455,function()
++    addButton(content,profile()=='frame_personal' and 'Defaults Profile: Personal' or 'Defaults Profile: Standard',24,455,function()
+         prefs:set('defaults_profile',profile()=='standard' and 'frame_personal' or 'standard')
+-        turnDefaults()
+     end)
+     if activeTab ~= 4 and activeTab ~= 6 then addButton(content,'Tab Defaults',390,455,defaults) end
+     addButton(content,'Back',740,455,close)
+@@ -191,6 +203,8 @@ return {engineHandlers={
+             end
+             return
+         end
++        local calibrated=native('standing calibrated')
++        if calibrated~=lastCalibrationStatus then dirty=true; lastCalibrationStatus=calibrated end
+         if not panel or dirty then rebuild() end
+     end,
+     onControllerButtonPress=function(id)
+diff --git a/files/data/scripts/omw/vr/ui/menu.lua b/files/data/scripts/omw/vr/ui/menu.lua
+index b489e23..2d5d02e 100644
+--- a/files/data/scripts/omw/vr/ui/menu.lua
++++ b/files/data/scripts/omw/vr/ui/menu.lua
+@@ -429,7 +429,7 @@ local function updateLayerArrangement()
+     local angle = -span / 2 + referenceWorldPose.orientation:getYaw()
+     for _, layer in ipairs(visibleLayersForArrangement) do
+         local transform = util.transform.rotateZ(angle) --* util.transform.rotateZ(windowArrangementRelativePose.orientation:getYaw())
+-        local rotatedPosition = transform:apply(windowArrangementRelativePose.position)
++        local rotatedPosition = transform:apply(windowArrangementRelativePose.position) * vr._frameSettingGet('applied world scale')
+ 
+         setLayerPoseIfNotOverridden(layer, {
+             position = referenceWorldPose.position + rotatedPosition,
+@@ -464,7 +464,7 @@ end
+ local function computeLayerPose()
+     local transform = util.transform.rotateZ(referenceWorldPose.orientation:getYaw())
+     return {
+-        position = referenceWorldPose.position + transform:apply(windowArrangementRelativePose.position),
++        position = referenceWorldPose.position + transform:apply(windowArrangementRelativePose.position) * vr._frameSettingGet('applied world scale'),
+         orientation = transform * windowArrangementRelativePose.orientation
+ }
+ end
+@@ -472,7 +472,7 @@ end
+ local function computeVirtualKeyboardPose()
+     local transform = util.transform.rotateZ(referenceWorldPose.orientation:getYaw())
+     return {
+-        position = referenceWorldPose.position + transform:apply(virtualKeyboardRelativePose.position),
++        position = referenceWorldPose.position + transform:apply(virtualKeyboardRelativePose.position) * vr._frameSettingGet('applied world scale'),
+         orientation = transform * virtualKeyboardRelativePose.orientation
+     }
+ end
+@@ -519,16 +519,19 @@ end
+ local wasKBMouseMode = false
+ local wasPaused = false
+ local updateOnce = true
+-local lastFrameMenuScale, lastFrameHudScale, lastFrameDistance
++local lastFrameMenuScale, lastFrameHudScale, lastFrameDistance, lastWorldScale, lastHeightOffset, lastSeated
+ local function onVRFrame()
+     if not initialized then
+         init()
+     end
+ 
++    local heightOffset = vr._frameSettingGet('applied height offset')
++    local seated = vr._frameSettingGet('applied seated')
++    local worldScale = vr._frameSettingGet('applied world scale')
+     local menuScale = frameNumber('menu_scale', 1, 0.7, 1.5)
+     local hudScale = frameNumber('hud_scale', 1, 0.7, 1.5)
+     local distance = frameSettings:get('menu_distance') ~= nil and frameNumber('menu_distance', 1, 0.6, 2) or nil
+-    if menuScale ~= lastFrameMenuScale or hudScale ~= lastFrameHudScale or distance ~= lastFrameDistance then
++    if heightOffset ~= lastHeightOffset or seated ~= lastSeated or worldScale ~= lastWorldScale or menuScale ~= lastFrameMenuScale or hudScale ~= lastFrameHudScale or distance ~= lastFrameDistance then
+         updateOnce = true
+         if distance then
+             local section = require('openmw.storage').playerSection(common.spaceOffsetGroupKey)
+@@ -539,6 +542,7 @@ local function onVRFrame()
+             I.vrspaces.offsetDerivedSpace('DefaultWindow', offset)
+         end
+         lastFrameMenuScale, lastFrameHudScale, lastFrameDistance = menuScale, hudScale, distance
++        lastWorldScale, lastHeightOffset, lastSeated = worldScale, heightOffset, seated
+     end
+     local KBMouseMode = I.vrinputs.isKBMouseMode()
+     if KBMouseMode ~= wasKBMouseMode then
+diff --git a/files/settings-default.cfg b/files/settings-default.cfg
+index 5ca1a5f..cc1d5f2 100644
+--- a/files/settings-default.cfg
++++ b/files/settings-default.cfg
+@@ -1286,6 +1286,11 @@ transparent postpass = true
+ # Should match your real height in meters. This is used to scale your position within the vr stage to better match your character.
+ player height = 1.8
+ 
++# Physical-to-game multiplier. Apparent world size is 100 / multiplier percent.
++world scale = 1.0
++height offset = 0.0
++seated = false
++
+ # If enabled, the game window will show your VR view. If not, it will show nothing.
+ mirror texture = true
+ 
