@@ -1,0 +1,16 @@
+Release the global distortion callback while its framebuffer context is still alive.
+
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -239,6 +239,11 @@
+     PostProcessor::~PostProcessor()
+     {
+         if (auto* bin = osgUtil::RenderBin::getRenderBinPrototype("DepthSortedBin"))
++            bin->setDrawCallback(nullptr);
++        // The global prototype must not retain our FBOs until process exit,
++        // after OpenGL context managers have already been destroyed.
++        if (auto* bin = osgUtil::RenderBin::getRenderBinPrototype("Distortion");
++            bin && bin->getDrawCallback() == mDistortionCallback.get())
+             bin->setDrawCallback(nullptr);
+     }
+ 
