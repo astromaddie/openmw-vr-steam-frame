@@ -91,7 +91,7 @@ eye images for every rendering or quality optimization.
 and 11 native Lua UI checks. Production helper executables and Lua modules are
 exercised directly. Shell syntax and applied-source whitespace checks passed.
 
-The native ARM64 Ubuntu 24.04 build passed with the active ordered patch series through 20 plus 23. Experimental patches 21–22 are deferred. Both VR and flat
+The native ARM64 Ubuntu 24.04 build passed with the active ordered patch series through 20 plus 23–24. Experimental patches 21–22 are deferred. Both VR and flat
 engine targets compile; a separate `BUILD_OPENMW_VR=OFF` configuration also built.
 ELF architecture, executable versions, shared-library resolution, source/patch
 manifests and package checksums passed. The pinned engine revision is
@@ -151,8 +151,46 @@ blank images and are not used as scene-correctness evidence.
 
 The original engine's native quit reproduced `GLX BadAccess` in
 `X_GLXMakeCurrent`. Patch 23 stops render threads before GUI teardown and
-eliminated that error in the candidate. A later SIGSEGV after the engine's
-peaceful-exit log remains under investigation; that log alone does not prove a
-clean process exit. The installer retains the author's
-`OPENMW_DISABLE_CRASH_CATCHER=1` workaround so this late fault cannot strand
-crash-handler children in Steam. Save reload and a clean exit remain open gates.
+eliminated that error in the candidate. A later SIGSEGV occurred after the engine's peaceful-exit log. A parent-launched
+GDB trace identified the retained owner: `RenderBinPrototypeList` →
+`osgUtil::RenderBin` → `MWRender::DistortionCallback` →
+`osg::FrameBufferObject`. Patch 24 releases the Distortion prototype's callback
+alongside the existing DepthSorted callback while the rendering context still
+exists. It clears only this postprocessor's callback.
+
+Candidate `eae2fdd` passed two normal-runtime checks with the crash catcher enabled:
+
+| Workload | Observed result | Raw engine exit status |
+| --- | --- | --- |
+| Direct-start interior, synchronized QA save, native quit | Save succeeded; no late graphics exception or crash-handler children | 0 |
+| `--load-savegame` of the QA save, run, native quit | `Reading save file`, cell load and Running confirmed | 0 |
+
+The direct-start interior places the player at an unsuitable location and logs
+falling-into-void resets. These runs verify lifecycle and save/load, not ordinary
+New Game positioning or scene correctness. The installer continues to retain the
+author's crash-catcher safeguard.
+
+The shell records the child's status after waiting for it. Restore the temporary
+Steam launcher by atomic replacement: truncating that live shell script can erase
+its remaining status-recording lines and create a false missing-result diagnosis.
+Both runs restored the baseline launcher SHA256
+`f8b5faeca1c4b14a9b4bb0bb41f80423b12c1079ee86f1650f8e6dabf1e67a99`,
+removed the temporary compositor override and left no owned game/reaper/debugger
+processes. Audio sinks and their volumes/mutes were unchanged.
+
+Installed package: `openmw-vr-0.51-rc1-frame-eae2fdd-aarch64.tar.xz`, SHA256
+`20c8a1fd4acdc5b94b0c2dfddda5714dedc67022ab067b517bde42cf561bf8de`.
+Engine ELF build ID: `b99052846eb94fb4faaa24e5b6ce0f8f32ccf255`.
+
+The normal `--skip-menu --new-game` path also reached the Imperial Prison Ship,
+with Jiub, the name-entry window and the native virtual keyboard visible in an
+F12 capture. Escape skipped the introductory movie. The private QA save
+succeeded, there were no falling-into-void resets, and native quit returned 0.
+
+A separate `OPENMW_FRAME_SETTINGS_PREVIEW=1` run captured Comfort, Controls,
+HUD & Menus, Display, Accessibility and Room. The supported Lua input-trigger API
+navigated between tabs; MenuBack removed the panel, and native quit returned 0.
+The capture exposed crowded active labels in the fixed-width tab spacing.
+Patch 25 uses the native horizontal layout and actual font widths for the tabs. Physical
+controller pointing, stereo presentation, comfort and sustained gameplay timing
+remain separate acceptance checks.

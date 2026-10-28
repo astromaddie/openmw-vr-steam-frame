@@ -33,7 +33,7 @@ package.preload['openmw.vr'] = function() return {
  _frameSettingSet=function(k,v) assert(native[k]~=nil); native[k]=v end,
  _recenterXY=function() xy=xy+1 end, _recenterZ=function() z=z+1 end,
  _frameOpenOptions=function() options=options+1; active=false end} end
-package.preload['openmw.ui'] = function() return {content=function(t) return t end,
+package.preload['openmw.ui'] = function() return {TYPE={Flex='Flex'},content=function(t) return t end,
  create=function(layout) return {layout=layout,destroy=function() end} end} end
 package.preload['openmw.util'] = function() return {vector2=function(x,y) return {x=x,y=y} end} end
 package.preload['openmw.storage'] = function() return {playerSection=section} end

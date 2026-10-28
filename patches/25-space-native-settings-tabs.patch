@@ -1,0 +1,39 @@
+diff --git a/files/data/scripts/omw/vr/ui/framesettings.lua b/files/data/scripts/omw/vr/ui/framesettings.lua
+--- a/files/data/scripts/omw/vr/ui/framesettings.lua
++++ b/files/data/scripts/omw/vr/ui/framesettings.lua
+@@ -55,7 +55,7 @@ local function label(text, x, y, width, size)
+     return {template=I.MWUI.templates.textNormal, props={text=text, position=V2(x,y),
+         size=V2(width,40), textSize=size or 24}}
+ end
+-local function addButton(content, text, x, y, cb)
++local function addButton(content, text, x, y, cb, textSize)
+     local n = #buttons + 1
+     local b = button((selected == n and '> ' or '') .. text, function() selected=n; cb(); dirty=true end)
+     b.alive=true
+@@ -73,7 +73,7 @@ local function addButton(content, text, x, y, cb)
+         b:update()
+         return true
+     end)
+-    b.textContent[1].props.textSize = y == 70 and 18 or 22
++    b.textContent[1].props.textSize = textSize or 22
+     b.element.layout.props.position=V2(x,y)
+     b.element:update()
+     buttons[n]=b
+@@ -105,10 +105,15 @@ rebuild=function()
+     buttons={}
+     pointerFocus=nil
+     local content={label('VR Settings',24,16,500,32)}
++    -- Let the native layout use actual font metrics for active and selected labels.
++    local tabContent={}
+     for n,name in ipairs(tabs) do
+-        addButton(content,(n==activeTab and '['..name..']' or name),24+(n-1)*142,70,
+-            function() activeTab=n; selected=n end)
++        if n > 1 then tabContent[#tabContent+1]={props={size=V2(12,0)}} end
++        addButton(tabContent,(n==activeTab and '['..name..']' or name),0,0,
++            function() activeTab=n; selected=n end,18)
+     end
++    content[#content+1]={type=ui.TYPE.Flex,props={horizontal=true,position=V2(24,70)},
++        content=ui.content(tabContent)}
+     local y=140
+     if activeTab==1 then
+         toggle(content,y,'Turning',controls:get('SmoothTurn') and 'Smooth' or 'Snap',
