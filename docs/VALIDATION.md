@@ -1,5 +1,32 @@
 # Validation and reproduction
 
+## Baseline-first verification
+
+The starting point is the existing native Frame port, not a new VR engine:
+
+- [Author release 1.0](https://github.com/stephen-moskal/openmw-vr-steam-frame/releases/tag/1.0), published 2026-10-02. Archive SHA256 `f57e246d9213d6ae0e50225953c14cc953a5f0093fa00d05d5a296f9ebd7029d`.
+- [Author technical notes](https://github.com/stephen-moskal/openmw-vr-steam-frame/blob/main/docs/TECHNICAL-NOTES.md): unused GUI shader lookups and rejected HTC Cosmos bindings are documented nonblocking warnings. Shutdown failure and historical 33–40 fps are separate known limitations.
+- [OpenMW-VR release source](https://gitlab.com/madsbuvi/openmw/-/tree/openmw-vr-0.51-rc1), pinned commit `56a8e01390507375c9c2f2593e1c09e0df88c505`, with the author's three Frame patches.
+
+Verification order: (1) unchanged release and a separate profile, (2) normal Steam
+menu/new-game/render/save/exit path, (3) one reproduced fix at a time. Native
+settings and custom offscreen diagnostics remain separate from baseline evidence.
+A headset display refresh or a standby process is not a rendered-gameplay result.
+
+2026-10-29 artifact comparison: all 413 original engine/resource/license files
+match the published archive. The remaining original file, `setup.sh`, had been
+replaced with the isolated installer; `frame_setup.py` and `SHA256SUMS` are extra.
+The installed engine SHA256 is
+`8fc90cc4e6e3c0295f5b5054435b6240263cf642ddf34a8026fbd70c5fb2ae87`.
+Its runtime dependencies resolve on SteamOS 0.5.6.
+
+**OpenMW Frame Baseline**, Steam shortcut appid `3917841542`, launches that engine
+without forced rendering, synthetic poses or preview flags. Its independent
+profile is `~/.config/openmw-frame-baseline` and its data/save root is
+`~/.local/share/openmw-frame-baseline`. The launcher retains the author's
+`OPENMW_DISABLE_CRASH_CATCHER=1` shutdown workaround. The experimental
+**OpenMW Frame** entry and its profile remain separate.
+
 ## Source and installer checks
 
 Run `scripts/check.sh /path/to/patched/openmw-source` for installer, shell syntax
@@ -59,8 +86,8 @@ eye images for every rendering or quality optimization.
 
 ## Results
 
-2026-10-28 source checks: 39 tests passed against the complete patched engine:
-11 installer/source-preparation, 10 XR/input/diagnostic, 3 GUI-pointer, 4 scale/posture
+2026-10-28 source checks: 41 tests passed against the complete patched engine:
+11 installer/source-preparation, 12 XR/input/diagnostic, 3 GUI-pointer, 4 scale/posture
 and 11 native Lua UI checks. Production helper executables and Lua modules are
 exercised directly. Shell syntax and applied-source whitespace checks passed.
 

@@ -1,0 +1,52 @@
+diff --git a/files/data/CMakeLists.txt b/files/data/CMakeLists.txt
+index 68a9fa6..2b96fd1 100644
+--- a/files/data/CMakeLists.txt
++++ b/files/data/CMakeLists.txt
+@@ -170,6 +170,7 @@ set(BUILTIN_DATA_FILES
+     scripts/omw/vr/spaces.lua
+     scripts/omw/vr/ui/button.lua
+     scripts/omw/vr/ui/common.lua
++    scripts/omw/vr/ui/framesettings.lua
+     scripts/omw/vr/ui/menu.lua
+     scripts/omw/vr/ui/player.lua
+     scripts/omw/vr/ui/settingsrenderer.lua
+diff --git a/files/data/scripts/omw/vr/inputs/player.lua b/files/data/scripts/omw/vr/inputs/player.lua
+index 02cdb26..974cd89 100644
+--- a/files/data/scripts/omw/vr/inputs/player.lua
++++ b/files/data/scripts/omw/vr/inputs/player.lua
+@@ -99,13 +99,29 @@ end
+ local smoothTurn= false
+ local smoothTurnSensitivity = 2.0
+ local snapTurnRate = 30.0 * math.pi / 180
++local function getNumberSetting(key, fallback)
++    local value = common.controlsSection:get(key)
++    if type(value) ~= 'number' or value ~= value or value == math.huge or value == -math.huge then
++        return fallback
++    end
++    return value
++end
++
++local function getBooleanSetting(key, fallback)
++    local value = common.controlsSection:get(key)
++    if type(value) ~= 'boolean' then
++        return fallback
++    end
++    return value
++end
++
+ local function updateControlsSettings()
+-    smoothTurn = common.controlsSection:get('SmoothTurn')
+-    smoothTurnSensitivity = common.controlsSection:get('SmoothTurnSensitivity')
+-    snapTurnRate = common.controlsSection:get('SnapTurnRate') * math.pi / 180
+-    physicalSneak = common.controlsSection:get('PhysicalSneak')
+-    physicalSneakMessage = common.controlsSection:get('PhysicalSneakMessage')
+-    physicalSneakOffset = common.controlsSection:get('PhysicalSneakOffset') * I.vrspaces.unitsPerMeter / 100
++    smoothTurn = getBooleanSetting('SmoothTurn', false)
++    smoothTurnSensitivity = getNumberSetting('SmoothTurnSensitivity', 2.0)
++    snapTurnRate = getNumberSetting('SnapTurnRate', 30) * math.pi / 180
++    physicalSneak = getBooleanSetting('PhysicalSneak', false)
++    physicalSneakMessage = getBooleanSetting('PhysicalSneakMessage', false)
++    physicalSneakOffset = getNumberSetting('PhysicalSneakOffset', 25) * I.vrspaces.unitsPerMeter / 100
+ end
+ updateControlsSettings()
+ common.controlsSection:subscribe(async:callback(updateControlsSettings))
