@@ -54,10 +54,12 @@ class SetupTests(unittest.TestCase):
 
     def test_launcher_exact_arguments_with_spaces(self):
         binary = self.build / 'openmw_vr'
-        binary.write_text('#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+        binary.write_text('#!/usr/bin/env python3\nimport json,sys,os\nprint(json.dumps(dict(argv=sys.argv[1:], crash_catcher=os.getenv("OPENMW_DISABLE_CRASH_CATCHER"))))\n')
         binary.chmod(0o755)
         launcher = setup.install(self.build, self.data, self.home, False)
-        args = json.loads(subprocess.check_output([str(launcher), '--start', 'Balmora, Guild of Mages'], text=True))
+        result = json.loads(subprocess.check_output([str(launcher), '--start', 'Balmora, Guild of Mages'], text=True))
+        self.assertEqual(result['crash_catcher'], '1')
+        args = result['argv']
         self.assertEqual(args[-2:], ['--start', 'Balmora, Guild of Mages'])
         self.assertEqual(args[:3], ['--replace', 'config', '--config'])
         self.assertIn(str(self.home / 'data/openmw-frame'), args)

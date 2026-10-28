@@ -161,6 +161,7 @@ def install(build, data, home, add_to_steam=True, saves=None):
     command = [str(build / 'openmw_vr'), '--replace', 'config', '--config', str(config),
                '--user-data', str(userdata), '--resources', str(build / 'resources')]
     atomic_write(launcher, '#!/bin/sh\nset -eu\ncd ' + shlex.quote(str(build)) + '\n'
+                 + 'export OPENMW_DISABLE_CRASH_CATCHER=1\n'
                  + 'export LD_LIBRARY_PATH=' + shlex.quote(str(build / 'lib')) + ':"${LD_LIBRARY_PATH:-}"\n'
                  + 'exec ' + shlex.join(command) + ' "$@"\n', 0o755)
     atomic_write(config / 'frame-install.json', json.dumps({'version': 1, 'build': str(build),
