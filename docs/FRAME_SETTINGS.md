@@ -184,7 +184,7 @@ No separate hit marker exists in the current pointer implementation.
 OPENMW_SOURCE=/path/to/patched/openmw python3 -m unittest discover -s tests/engine_interaction -v
 ```
 
-Four local groups pass, including compilation/execution of the production MWVR
+Five native groups pass, including compilation/execution of the production MWVR
 routing helper. Cases cover multipliers 0.25/1/4, menu plus hand displacement,
 GUI exclusions, unchanged native/telekinesis/console distances, and panel priority
 over foreground NPCs/walls. Closing the modal restores native world picking.
@@ -192,9 +192,15 @@ Source guards verify dedicated OSG traversal and local hit-coordinate forwarding
 
 A fifth group requires the actual OSG SDK from the native builder. Set
 `OPENMW_OSG_TEST=1`, `OPENMW_OSG_CXXFLAGS` and `OPENMW_OSG_LDFLAGS` to its include
-and link flags. It executes SceneView culling and state inheritance for both eye
+and link flags. Mark the fetched SDK includes with `-isystem`. It executes
+SceneView culling and state inheritance for both eye
 views, ordinary/reversed depth, hostile inherited/leaf state, GUI sorting and
 pointer order. It also verifies that GUI bins escape transparent ancestors,
 avoid the world's transparent-depth postpass and precede postprocessing without
 changing ordinary world depth. These checks do not replace rendered pixels or
 physical pointer operation; current results are in [validation](VALIDATION.md).
+
+The optional [foreground-guard addon](../tests/engine_interaction/fixtures/ui_occlusion/README.md)
+reproduces the actual tutorial obstruction in a separate profile. It uses runtime
+View/DefaultWindow poses and normal game objects, then requests a native quit;
+it is not part of the shipped game content.

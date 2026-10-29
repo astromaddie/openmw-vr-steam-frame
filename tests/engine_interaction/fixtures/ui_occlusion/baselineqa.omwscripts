@@ -1,0 +1,3 @@
+MENU: scripts/baselineqa/qa.lua
+PLAYER: scripts/baselineqa/player.lua
+GLOBAL: scripts/baselineqa/world.lua

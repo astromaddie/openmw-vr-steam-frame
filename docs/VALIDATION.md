@@ -243,6 +243,41 @@ Patch 26 makes active GUI layers render after world geometry and prioritizes a
 pickable GUI hit. Interactive message boxes are included in the engine's GUI
 mode. A separate later bin keeps a GUI-targeting pointer visible. Outside menus,
 gameplay HUD/world pointer depth and native world activation ranges remain.
-The source checks currently pass 42 groups; the additional real-OSG cull/state
-regression requires the native builder SDK. Build, native regression and device
-results are recorded below after verification.
+All 43 checks pass: 11 installer/source preparation, 12 engine/input, five GUI
+interaction/rendering, four scale/posture and 11 Lua UI. The real-OSG group runs
+against the fetched native SDK with no skips. It covers both eye views, normal
+and reversed depth, render-bin ordering, inherited state and world-depth retention.
+The full native build passed 1,751 Ninja tasks; the separate VR-OFF flat target
+passed and the package was restored to the VR configuration.
+
+Installed package: `openmw-vr-0.51-rc1-frame-4bbd78e-aarch64.tar.xz`, SHA256
+`ad9e3b91e2ed8262cb6148931d2ec212d5f1e3afcbeff0d298d41f799fb7376c`.
+Corresponding engine-source archive SHA256:
+`78cfee643f2bde17c381f2728e88665c1cb112ab7cbd1fab8a2d206cb74e49d5`.
+VR ELF build ID: `6862cd0d4b5a3d987f73cb4645f173c8ec118920`.
+Architecture, internal/archive checksums, manifests and shared-library closure
+passed before installation.
+
+The [QA addon](../tests/engine_interaction/fixtures/ui_occlusion/README.md) starts
+an ordinary New Game in a separate profile, enters a temporary name, then places
+`chargen boat guard 1` 45% of the way from the runtime View pose to DefaultWindow
+while the movement tutorial pauses gameplay. The old build's native F12 image
+shows the model hiding text and OK. With the same addon, pose and settings, the
+new build shows the complete text and button over the model. Return dismisses the
+message, the world resumes and native quit returns 0. This tests rendering and
+keyboard dismissal; controller aiming/clicking uses the separately traced and
+regression-tested PointerActivate → GUI focus/local coordinates → MyGUI button
+path. No forced-render or synthetic tracking flags were used.
+
+The installer changed only the launcher and install metadata; the other ten
+backed-up profile/launcher files retained their hashes. A verified byte backup
+with permissions was taken first. The Baseline launcher and original stock
+standby-pause setting were restored, and no owned game/debugger processes remained.
+Speaker/EQ output was unchanged by testing.
+
+
+The completed modal-regression pass removed approximately 2.0 GiB of generated
+native build/cache data, duplicate source staging, expanded packaging and private
+QA data after recording the results. The current archives, patched source,
+useful before/after captures, profile backup and one previous compressed build
+for rollback remain. The installed author baseline and user game data are kept.
