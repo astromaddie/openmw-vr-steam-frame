@@ -4,6 +4,7 @@
 #include <apps/openmw/mwvr/guirender.hpp>
 
 #include <osg/Camera>
+#include <osg/DisplaySettings>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/State>
@@ -139,7 +140,9 @@ int main()
 
         for (float eye : {-.03f, .03f})
         {
-            osg::ref_ptr<osgUtil::SceneView> view = new osgUtil::SceneView;
+            // SceneView's default constructor leaves DisplaySettings null;
+            // setDefaults() configures render state but does not allocate it.
+            osg::ref_ptr<osgUtil::SceneView> view = new osgUtil::SceneView(new osg::DisplaySettings);
             view->setDefaults();
             view->getDisplaySettings()->setStereo(false);
             view->setViewport(0, 0, 640, 480);
