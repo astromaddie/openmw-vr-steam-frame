@@ -1,0 +1,223 @@
+diff --git a/apps/openmw/mwrender/renderbin.hpp b/apps/openmw/mwrender/renderbin.hpp
+--- a/apps/openmw/mwrender/renderbin.hpp
++++ b/apps/openmw/mwrender/renderbin.hpp
+@@ -15,6 +15,10 @@
+         RenderBin_FirstPerson = 12,
+         RenderBin_SunGlare = 13,
+         RenderBin_Distortion = 14,
++        // Spatial menus and their pointer compose after every world pass, in
++        // the same eye framebuffer consumed by the postprocessor.
++        RenderBin_VRGUI = 15,
++        RenderBin_VRGUIPointer = 16,
+     };
+ 
+ }
+diff --git a/apps/openmw/mwvr/guipointer.hpp b/apps/openmw/mwvr/guipointer.hpp
+--- a/apps/openmw/mwvr/guipointer.hpp
++++ b/apps/openmw/mwvr/guipointer.hpp
+@@ -25,11 +25,11 @@
+         return .25f * (guiHit ? guiPointerScale(scale) : 1.f);
+     }
+ 
+-    // Separate query results prevent a distant occluder from becoming an
+-    // activatable world target. WorldCast retains the native gameplay range.
+-    template <class Result, class GuiCast, class OcclusionCast, class WorldCast>
++    // Active menus render in front of the world and must be selected the same
++    // way. Only the GUI query has extended reach; WorldCast retains native range.
++    template <class Result, class GuiCast, class WorldCast>
+     float targetWithGui(Result& result, bool guiMode, uint32_t ignoreMask,
+-        float scale, float unitsPerMeter, GuiCast guiCast, OcclusionCast occlusionCast, WorldCast worldCast)
++        float scale, float unitsPerMeter, GuiCast guiCast, WorldCast worldCast)
+     {
+         if (guiMode && !(ignoreMask & MWRender::Mask_3DGUI))
+         {
+@@ -37,16 +37,11 @@
+             const float distance = guiCast(gui, guiPointerReach(scale, unitsPerMeter));
+             if (gui.mHit)
+             {
+-                Result occluder{};
+-                const float occlusionDistance = occlusionCast(occluder, distance, ignoreMask | MWRender::Mask_3DGUI);
+-                if (!occluder.mHit || occlusionDistance >= distance)
+-                {
+-                    result = gui;
+-                    return distance;
+-                }
++                result = gui;
++                return distance;
+             }
+-            // The GUI query already handled all selectable GUI. The fallback
+-            // must not accidentally select one through an occluding wall.
++            // A miss still uses the native world query, excluding GUI already
++            // considered above. Explicit caller exclusions remain authoritative.
+             return worldCast(result, ignoreMask | MWRender::Mask_3DGUI);
+         }
+         return worldCast(result, ignoreMask);
+diff --git a/apps/openmw/mwvr/vrgui.cpp b/apps/openmw/mwvr/vrgui.cpp
+--- a/apps/openmw/mwvr/vrgui.cpp
++++ b/apps/openmw/mwvr/vrgui.cpp
+@@ -1,4 +1,5 @@
+ #include "vrgui.hpp"
++#include "guirender.hpp"
+ #include "vrinputmanager.hpp"
+ 
+ #include <algorithm>
+@@ -275,6 +276,7 @@
+         std::string layerName, VRGUIManager* parent)
+         : mLayerName(layerName)
+         , mGeometryRoot(geometryRoot)
++        , mOverlayState(createGuiOverlayState())
+         , mCameraRoot(cameraRoot)
+         , mPickable()
+         , mVrLayer()
+@@ -702,7 +704,15 @@
+             (*texCoords)[3].set(mRealRect.right, 1.f - mRealRect.top);
+             texCoords->dirty();
+ 
++            // Push an immutable policy during cull, so paused actors cannot
++            // cover menus and both eyes retain their existing view/FBO path.
++            const bool overlay = guiOverlayRequired(
++                MWBase::Environment::get().getWindowManager()->isGuiMode(), mLayerName);
++            if (overlay)
++                cv->pushStateSet(mOverlayState);
+             geometry->accept(*cv);
++            if (overlay)
++                cv->popStateSet();
+         }
+     }
+ 
+diff --git a/apps/openmw/mwvr/vrgui.hpp b/apps/openmw/mwvr/vrgui.hpp
+--- a/apps/openmw/mwvr/vrgui.hpp
++++ b/apps/openmw/mwvr/vrgui.hpp
+@@ -122,6 +122,7 @@
+         std::array<osg::ref_ptr<osg::Geometry>, 2> mGeometries;
+         osg::ref_ptr<osg::PositionAttitudeTransform> mTransform{ new osg::PositionAttitudeTransform };
+         osg::ref_ptr<osg::StateSet> mStateset;
++        osg::ref_ptr<osg::StateSet> mOverlayState;
+         MyGUI::IntRect mRect{};
+         MyGUI::FloatRect mRealRect{};
+         osg::ref_ptr<osg::Group> mCameraRoot;
+diff --git a/apps/openmw/mwvr/vrpointer.cpp b/apps/openmw/mwvr/vrpointer.cpp
+--- a/apps/openmw/mwvr/vrpointer.cpp
++++ b/apps/openmw/mwvr/vrpointer.cpp
+@@ -2,6 +2,7 @@
+ #include "vrgui.hpp"
+ #include "vrutil.hpp"
+ #include "guipointer.hpp"
++#include "guirender.hpp"
+ 
+ #include <osg/BlendFunc>
+ #include <osg/Drawable>
+@@ -221,6 +222,7 @@
+ 
+             mCrosshair->setStretch(mDistanceToPointerTarget / 3.f);
+             const bool guiHit = mPointerRay.mHitNode && mPointerRay.mHitNode->getName() == "VRGUILayer";
++            mCrosshair->setGuiHit(guiHit);
+             mCrosshair->setWidth(Util::pointerWidth(guiHit, VR::Session::instance().worldScale()));
+             mCrosshair->setOffset(2.f * mDistanceToPointerTarget / 3.f);
+             mCrosshair->show();
+@@ -375,6 +377,7 @@
+         : mParent(parent)
+         , mGeometry(createPointerGeometry(pyramid, color, nearAlpha, farAlpha))
+         , mTransform(new osg::PositionAttitudeTransform)
++        , mGuiState(createGuiOverlayState(true))
+         , mStretch(1.f)
+         , mWidth(1.f)
+         , mOffset(0.f)
+@@ -413,6 +416,13 @@
+         }
+     }
+ 
++    void Crosshair::setGuiHit(bool guiHit)
++    {
++        // Only a menu hit needs an unoccluded beam. World activation, placement
++        // previews and gameplay pointers keep their ordinary scene depth.
++        mTransform->setStateSet(guiHit ? mGuiState.get() : nullptr);
++    }
++
+     void Crosshair::setStretch(float stretch)
+     {
+         mStretch = stretch;
+diff --git a/apps/openmw/mwvr/vrpointer.hpp b/apps/openmw/mwvr/vrpointer.hpp
+--- a/apps/openmw/mwvr/vrpointer.hpp
++++ b/apps/openmw/mwvr/vrpointer.hpp
+@@ -36,6 +36,7 @@
+         void hide();
+         void show();
+         void setStretch(float stretch);
++        void setGuiHit(bool guiHit);
+         void setWidth(float width);
+         void setOffset(float distance);
+         void setParent(osg::ref_ptr<osg::Group> parent);
+@@ -44,6 +45,7 @@
+         osg::ref_ptr<osg::Group> mParent;
+         osg::ref_ptr<osg::Geometry> mGeometry;
+         osg::ref_ptr<osg::PositionAttitudeTransform> mTransform;
++        osg::ref_ptr<osg::StateSet> mGuiState;
+         float mStretch;
+         float mWidth;
+         float mOffset;
+diff --git a/apps/openmw/mwvr/vrutil.cpp b/apps/openmw/mwvr/vrutil.cpp
+--- a/apps/openmw/mwvr/vrutil.cpp
++++ b/apps/openmw/mwvr/vrutil.cpp
+@@ -71,12 +71,6 @@
+                 [&](MWRender::RayResult& guiResult, float reach) {
+                     return VRGUIManager::instance().castPointerRay(guiResult, pose, reach);
+                 },
+-                [&](MWRender::RayResult& occluder, float reach, uint32_t mask) {
+-                    // Occlusion only: never expose this extended world hit as
+-                    // the activation/drop target. GUI uses ordinary scene depth.
+-                    return world->getTargetObject(occluder, pose.position.asMWUnits(), pose.orientation,
+-                        reach, true, mask);
+-                },
+                 [&](MWRender::RayResult& result, uint32_t worldIgnoreMask) {
+                     if (wm->isGuiMode() && wm->isConsoleMode())
+                         return world->getTargetObject(result, pose.position.asMWUnits(), pose.orientation,
+diff --git a/apps/openmw/mwvr/guirender.hpp b/apps/openmw/mwvr/guirender.hpp
+new file mode 100644
+--- /dev/null
++++ b/apps/openmw/mwvr/guirender.hpp
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include "../mwrender/renderbin.hpp"
++
++#include <osg/Depth>
++#include <osg/StateSet>
++#include <osgUtil/RenderBin>
++
++#include <string_view>
++
++namespace MWVR
++{
++    inline bool guiOverlayRequired(bool guiMode, std::string_view layer)
++    {
++        // WindowManager::isGuiMode also includes interactive message boxes,
++        // console and chargen. Timed tutorial messages use Notification without
++        // entering GUI mode. Leave gameplay HUD layers at their native depth.
++        return guiMode || layer == "Notification";
++    }
++
++    inline osg::ref_ptr<osg::StateSet> createGuiOverlayState(bool pointer = false)
++    {
++        // Do not reuse DepthSortedBin: the postprocessor installs a transparent
++        // depth postpass on that prototype. UI must never populate world depth.
++        static const bool registered = [] {
++            osgUtil::RenderBin::addRenderBinPrototype(
++                "VRGUI", new osgUtil::RenderBin(osgUtil::RenderBin::SORT_BACK_TO_FRONT));
++            return true;
++        }();
++        (void)registered;
++
++        osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
++        constexpr auto protectedOverride = osg::StateAttribute::PROTECTED | osg::StateAttribute::OVERRIDE;
++        state->setAttributeAndModes(new osg::Depth(osg::Depth::ALWAYS, 0.0, 1.0, false),
++            osg::StateAttribute::OFF | protectedOverride);
++        // Protected defeats inherited depth overrides; override prevents a
++        // drawable from silently restoring world depth beneath this policy.
++        state->setMode(GL_DEPTH_TEST, osg::StateAttribute::OFF | protectedOverride);
++        state->setRenderBinDetails(pointer ? MWRender::RenderBin_VRGUIPointer : MWRender::RenderBin_VRGUI,
++            "VRGUI", osg::StateSet::OVERRIDE_PROTECTED_RENDERBIN_DETAILS);
++        state->setNestRenderBins(false);
++        return state;
++    }
++}

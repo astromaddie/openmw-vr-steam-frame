@@ -231,3 +231,18 @@ data were removed. This final testing pass removed approximately 3.3 GiB of
 allocated files on the Mac and 1.5 GiB on the Frame. The author baseline, final
 installed release, source, current binary/source archives and user profiles/game
 data remain. The shared device booking and Mac build slot were released.
+
+### Modal UI obstruction regression
+
+A 2026-10-29 gameplay capture showed the introductory guard drawn across a
+movement tutorial's modal panel, hiding its OK button. The former scene-depth
+policy also rejected a GUI hit when a world model was closer to the controller.
+This could trap progression with the actor frozen by the message box.
+
+Patch 26 makes active GUI layers render after world geometry and prioritizes a
+pickable GUI hit. Interactive message boxes are included in the engine's GUI
+mode. A separate later bin keeps a GUI-targeting pointer visible. Outside menus,
+gameplay HUD/world pointer depth and native world activation ranges remain.
+The source checks currently pass 42 groups; the additional real-OSG cull/state
+regression requires the native builder SDK. Build, native regression and device
+results are recorded below after verification.

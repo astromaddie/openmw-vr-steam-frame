@@ -20,7 +20,7 @@ focus is absent; teardown must release child XR objects before the session.
 | World, terrain, water, shadows | OSG stereo cameras; compare both eyes at several yaw angles |
 | Weapon and tracked hands | Upstream VR animation/combat; check aim versus visible weapon |
 | Sky, fog, particles, billboards | Existing stereo rendering; check translation, roll, depth and culling |
-| Inventory, dialogue, journal, map | Existing MyGUI VR surfaces; check alpha, pointer occlusion and clipping |
+| Inventory, dialogue, journal, map | Existing MyGUI VR surfaces; modal layers and their pointer take priority over world geometry |
 | HUD and radial menu | Existing VR surfaces; verify readable angular size and stable anchoring |
 | Intro/video/loading | Existing VR presentation; verify transitions and no forced camera motion |
 

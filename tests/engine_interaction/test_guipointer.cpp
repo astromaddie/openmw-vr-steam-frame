@@ -12,26 +12,20 @@ namespace
     {
         float guiDistance = 0, worldDistance = 0, nativeRange = 192, units = 70;
         float guiWidth = 1, cursorWorldX = 0;
-        int guiCalls = 0, occlusionCalls = 0, worldCalls = 0;
+        int guiCalls = 0, worldCalls = 0;
         float guiReach = 0;
         unsigned worldMask = 0;
         float query(Result& result, bool guiMode, unsigned ignoreMask, float scale)
         {
             return MWVR::Util::targetWithGui(result,guiMode,ignoreMask,scale,units,
                 [&](Result& out,float reach) {
-                    ++guiCalls; guiReach=reach;
+                    ++guiCalls; guiReach=reach; out={};
                     if (guiDistance>0 && guiDistance<=reach)
                         out={true,true,cursorWorldX/guiWidth};
                     return out.mHit ? guiDistance : 0.f;
                 },
-                [&](Result& out,float reach,unsigned mask) {
-                    ++occlusionCalls;
-                    assert(mask & MWRender::Mask_3DGUI);
-                    if (worldDistance>0 && worldDistance<=reach) out={true,false,0};
-                    return out.mHit ? worldDistance : 0.f;
-                },
                 [&](Result& out,unsigned mask) {
-                    ++worldCalls; worldMask=mask;
+                    ++worldCalls; worldMask=mask; out={};
                     // Existing activation range is entirely owned by this
                     // callback, never replaced with the extended GUI length.
                     if (worldDistance>0 && worldDistance<=nativeRange) out={true,false,0};
@@ -52,42 +46,52 @@ int main()
         Result result;
         near(scene.query(result,true,MWRender::Mask_3DGUI_NonIntersectable,scale),scene.guiDistance);
         assert(result.mHit && result.gui); near(result.localX,.25f);
-        assert(scene.guiCalls==1 && scene.occlusionCalls==1 && scene.worldCalls==0);
+        assert(scene.guiCalls==1 && scene.worldCalls==0);
         near(scene.guiReach,3.f*scene.units*scale);
         near(pointerWidth(true,scale)/scale,.25f); near(pointerWidth(false,scale),.25f);
 
         Scene excluded; excluded.guiDistance=1; excluded.worldDistance=100;
         near(excluded.query(result,true,MWRender::Mask_3DGUI,scale),100);
-        assert(excluded.guiCalls==0 && excluded.occlusionCalls==0 && excluded.worldCalls==1);
+        assert(excluded.guiCalls==0 && excluded.worldCalls==1);
         assert(excluded.worldMask==MWRender::Mask_3DGUI);
 
         Scene gameplay; gameplay.guiDistance=1; gameplay.worldDistance=193;
         result={}; near(gameplay.query(result,false,0,scale),0);
-        assert(!result.mHit && gameplay.guiCalls==0 && gameplay.occlusionCalls==0);
+        assert(!result.mHit && gameplay.guiCalls==0);
         assert(gameplay.worldMask==0); // no change to gameplay masks/range
         gameplay.worldDistance=191; near(gameplay.query(result,false,0,scale),191);
 
         Scene missing; missing.worldDistance=193;
         result={}; near(missing.query(result,true,0,scale),0);
-        assert(!result.mHit && missing.worldCalls==1 && missing.occlusionCalls==0);
+        assert(!result.mHit && missing.worldCalls==1);
         assert(missing.worldMask & MWRender::Mask_3DGUI);
     }
+    // A foreground NPC/wall must neither hide an active modal nor steal its
+    // pointer. This includes walls outside ordinary activation range.
     Scene occluded;
-    occluded.guiDistance=4*occluded.units; // scale4, physical menu at1m
-    occluded.worldDistance=3*occluded.units; // wall beyond native2.74m, before GUI
+    occluded.guiDistance=4*occluded.units;
+    occluded.worldDistance=3*occluded.units;
     Result result;
-    near(occluded.query(result,true,0,4),0);
-    assert(!result.mHit); // distant wall must never become a pickup/activation target
-    assert(occluded.guiCalls==1 && occluded.occlusionCalls==1 && occluded.worldCalls==1);
+    near(occluded.query(result,true,0,4),occluded.guiDistance);
+    assert(result.mHit && result.gui);
+    assert(occluded.guiCalls==1 && occluded.worldCalls==0);
 
     Scene nearWall; nearWall.guiDistance=280; nearWall.worldDistance=140;
-    near(nearWall.query(result,true,0,4),140); assert(result.mHit && !result.gui);
+    near(nearWall.query(result,true,0,4),280); assert(result.mHit && result.gui);
+    assert(nearWall.worldCalls==0);
     Scene foreground; foreground.guiDistance=140; foreground.worldDistance=180;
     near(foreground.query(result,true,0,4),140); assert(result.mHit && result.gui);
+
+    // Closing the modal immediately restores native world picking even though
+    // the same spatial panel and foreground actor still exist in the fixture.
+    near(nearWall.query(result,false,0,4),140); assert(result.mHit && !result.gui);
+    assert(nearWall.worldMask==0);
+    near(occluded.query(result,false,0,4),0);
+    assert(!result.mHit && occluded.worldCalls==1);
     Scene telekinesis; telekinesis.nativeRange=500; telekinesis.worldDistance=499;
     near(telekinesis.query(result,true,0,4),499); assert(!result.gui);
     Scene console; console.nativeRange=192*50; console.worldDistance=9000;
     near(console.query(result,true,0,4),9000); assert(!result.gui);
     near(guiPointerScale(std::numeric_limits<float>::quiet_NaN()),1);
-    std::cout << "PASS: production GUI routing, scales .25/1/4, masks, local cursor/width, unchanged gameplay/telekinesis/console reach, foreground and distant-wall occlusion\n";
+    std::cout << "PASS: production GUI routing, scales .25/1/4, masks, local cursor/width, unchanged gameplay/telekinesis/console reach, modal priority over foreground NPCs and distant walls\n";
 }

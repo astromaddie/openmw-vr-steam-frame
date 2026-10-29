@@ -150,7 +150,7 @@ World Size, menu/wrist HUD angular size and pointer alignment at 50/100/200%,
 standing-to-seated-to-standing, both calibration actions, focus regain and a
 system recenter.
 
-## Scaled GUI pointer reach (patch 15)
+## Scaled GUI pointer reach and modal priority (patches 15, 26)
 
 GUI selection casts a separate ray with a reach of three physical metres,
 converted by the applied world scale. This covers the configured two-metre
@@ -160,14 +160,20 @@ menu distance with hand displacement margin. The ray traverses only
 excluded; hidden layers are detached. RTT cameras and world subtrees are not
 part of this traversal. Callers explicitly ignoring `Mask_3DGUI` bypass it.
 
-Menus use ordinary scene depth. Before accepting a GUI hit, an occlusion-only
-world query checks the full distance to the GUI, excluding all GUI geometry.
-A nearer wall rejects the GUI even when that wall is beyond native activation
-range. That extended world result is never returned for activation or pickup.
-If no visible GUI is hit, the original native activation/telekinesis/console
-range runs unchanged, with GUI excluded from that fallback. Outside GUI mode,
-the original ray and mask behavior are unchanged. Foreground GUI takes priority
-over world objects behind it.
+During GUI interaction, the nearest pickable panel takes priority over world
+geometry, including a nearer NPC or wall. This matches its rendered overlay and
+keeps modal buttons reachable when gameplay has paused a character in front of
+them. `WindowManager::isGuiMode()` includes interactive message boxes as well as
+ordinary menus, dialogue and character creation. If no panel is hit, the original
+native activation/telekinesis/console range runs unchanged, with GUI excluded
+from that fallback. Outside GUI mode, the original ray and mask behavior remain.
+
+Active GUI layers render in a dedicated back-to-front bin after world passes,
+including transparency, first-person models and distortion. Protected depth
+state disables testing and writes for these layers. The existing eye framebuffer
+and postprocessor are retained. Timed Notification layers also use this policy.
+A pointer targeting a GUI panel renders in a later bin. Gameplay HUD layers and
+world-targeting pointers retain their normal scene depth outside menu interaction.
 
 The GUI result preserves OSG's actual local-space intersection point for cursor
 mapping. Pointer width scales only while a GUI layer is targeted, so its physical
@@ -178,11 +184,17 @@ No separate hit marker exists in the current pointer implementation.
 OPENMW_SOURCE=/path/to/patched/openmw python3 -m unittest discover -s tests/engine_interaction -v
 ```
 
-Three groups pass, including compilation/execution of the private MWVR routing
-helper. Cases cover multipliers 0.25/1/4, maximum menu plus hand displacement,
-GUI exclusions, unchanged native/telekinesis/console distances, foreground GUI,
-a nearer world target, and a wall at three world metres hiding a menu at four
-world metres while remaining outside the native activation range. Source guards
-verify dedicated OSG traversal and original local hit-coordinate forwarding.
-The callback fixtures do not execute OSG intersections; full native build and
-rendered/physical pointer verification remain integration checks.
+Four local groups pass, including compilation/execution of the production MWVR
+routing helper. Cases cover multipliers 0.25/1/4, menu plus hand displacement,
+GUI exclusions, unchanged native/telekinesis/console distances, and panel priority
+over foreground NPCs/walls. Closing the modal restores native world picking.
+Source guards verify dedicated OSG traversal and local hit-coordinate forwarding.
+
+A fifth group requires the actual OSG SDK from the native builder. Set
+`OPENMW_OSG_TEST=1`, `OPENMW_OSG_CXXFLAGS` and `OPENMW_OSG_LDFLAGS` to its include
+and link flags. It executes SceneView culling and state inheritance for both eye
+views, ordinary/reversed depth, hostile inherited/leaf state, GUI sorting and
+pointer order. It also verifies that GUI bins escape transparent ancestors,
+avoid the world's transparent-depth postpass and precede postprocessing without
+changing ordinary world depth. These checks do not replace rendered pixels or
+physical pointer operation; current results are in [validation](VALIDATION.md).
